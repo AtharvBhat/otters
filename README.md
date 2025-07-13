@@ -1,2 +1,2 @@
 # otters
-Experimenting with a rust based hybrid DB
+Experimenting with a minimal vector search tool in rust

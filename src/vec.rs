@@ -1,16 +1,41 @@
-use std::iter::zip;
+pub struct VecSearchResult<I>
+where
+    I: Iterator<Item = (usize, f32)>,
+{
+    iter: I,
+}
+
+impl<I> VecSearchResult<I>
+where
+    I: Iterator<Item = (usize, f32)>,
+{
+    pub fn new(iter: I) -> Self {
+        Self { iter }
+    }
+
+    pub fn take_min(self, k: usize) -> Vec<(usize, f32)> {
+        take_min(k, self.iter)
+    }
+
+    pub fn take_max(self, k: usize) -> Vec<(usize, f32)> {
+        take_max(k, self.iter)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RowAlignedVecs {
     vectors: Vec<Vec<f32>>,
     dim: usize,
-    norms: Vec<f32>,
+    inv_norms: Vec<f32>,
     n_vecs: usize,
 }
 
-pub enum ComparisonMethods {
-    Cosine,
-    Euclidean,
+#[derive(Debug, Clone)]
+pub struct ColumnAlignedVecs {
+    vectors: Vec<Vec<f32>>,
+    dim: usize,
+    inv_norms: Vec<f32>,
+    n_vecs: usize,
 }
 
 impl RowAlignedVecs {
@@ -18,7 +43,7 @@ impl RowAlignedVecs {
         Self {
             vectors: Vec::new(),
             dim,
-            norms: Vec::new(),
+            inv_norms: Vec::new(),
             n_vecs: 0,
         }
     }
@@ -32,8 +57,8 @@ impl RowAlignedVecs {
             ));
         }
         let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-        self.vectors.push(vector);
-        self.norms.push(norm);
+        self.vectors.push(vector.clone());
+        self.inv_norms.push(1.0 / norm);
         self.n_vecs += 1;
         Ok(())
     }
@@ -42,61 +67,214 @@ impl RowAlignedVecs {
         vectors.iter().try_for_each(|x| self.add_vector(x.to_vec()))
     }
 
-    // compare cosine similarity of any two generic row aligned vector
-    pub fn cosine_generic(self, vec1: &Vec<f32>, vec2: &Vec<f32>) -> f32 {
-        let norm1: f32 = vec1.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm2: f32 = vec2.iter().map(|x| x * x).sum::<f32>().sqrt();
-        zip(vec1, vec2)
-            .map(|(x, y)| x / norm1 * y / norm2)
-            .sum::<f32>()
+    pub fn search_vec_cosine<'a>(
+        &'a self,
+        vec_r: &'a [f32],
+    ) -> VecSearchResult<impl Iterator<Item = (usize, f32)> + 'a> {
+        let vec_r_inv_norm = 1.0 / vec_r.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let iter = self.vectors.iter().enumerate().zip(&self.inv_norms).map(
+            move |((i, vec_l), inv_norm_l)| {
+                let norm_factor = inv_norm_l * vec_r_inv_norm;
+                let similarity =
+                    vec_l.iter().zip(vec_r).map(|(x, y)| x * y).sum::<f32>() * norm_factor;
+                (i, similarity)
+            },
+        );
+        VecSearchResult::new(iter)
     }
 
-    // compare cosine similarity of a generic vector with stored vectors
-    pub fn cosine(&self, vec_l: &Vec<f32>, vec_l_norm: &f32, vec_r: &Vec<f32>) -> f32 {
-        let norm_r: f32 = vec_r.iter().map(|x| x * x).sum::<f32>().sqrt();
-        zip(vec_l, vec_r)
-            .map(|(x, y)| x / vec_l_norm * y / norm_r)
-            .sum()
+    pub fn search_vec_euclidean<'a>(
+        &'a self,
+        vec_r: &'a [f32],
+    ) -> VecSearchResult<impl Iterator<Item = (usize, f32)> + 'a> {
+        let iter = self.vectors.iter().enumerate().map(move |(i, vec_l)| {
+            let distance = vec_l
+                .iter()
+                .zip(vec_r)
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>();
+            (i, distance)
+        });
+        VecSearchResult::new(iter)
     }
 
-    pub fn euclidean(&self, vec1: &Vec<f32>, vec2: &Vec<f32>) -> f32 {
-        zip(vec1, vec2)
-            .map(|(x, y)| (x - y).powi(2))
-            .sum::<f32>()
-            .sqrt()
-    }
-
-    pub fn compare(
+    pub fn take_min(
         &self,
-        compare_idx: usize,
-        vec_r: &Vec<f32>,
-        method: ComparisonMethods,
-    ) -> Result<f32, String> {
-        if compare_idx >= self.n_vecs {
+        k: usize,
+        iter: impl Iterator<Item = (usize, f32)>,
+    ) -> Vec<(usize, f32)> {
+        take_min(k, iter)
+    }
+
+    pub fn take_max(
+        &self,
+        k: usize,
+        iter: impl Iterator<Item = (usize, f32)>,
+    ) -> Vec<(usize, f32)> {
+        take_max(k, iter)
+    }
+}
+
+impl ColumnAlignedVecs {
+    pub fn new(dim: usize) -> Self {
+        Self {
+            vectors: vec![Vec::new(); dim],
+            dim,
+            inv_norms: Vec::new(),
+            n_vecs: 0,
+        }
+    }
+
+    pub fn add_vector(&mut self, vector: Vec<f32>) -> Result<(), String> {
+        if vector.len() != self.dim {
             return Err(format!(
-                "Comparison Index {} out of range {}",
-                compare_idx, self.n_vecs
+                "Input vector length {} does not match expected dimension {}",
+                vector.len(),
+                self.dim
             ));
         }
-        let result = match method {
-            ComparisonMethods::Cosine => {
-                self.cosine(&self.vectors[compare_idx], &self.norms[compare_idx], vec_r)
-            }
-            ComparisonMethods::Euclidean => self.euclidean(&self.vectors[compare_idx], vec_r),
-        };
-        Ok(result)
+        let inv_norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for (i, &value) in vector.clone().iter().enumerate() {
+            self.vectors[i].push(value);
+        }
+        self.inv_norms.push(1.0 / inv_norm);
+        self.n_vecs += 1;
+        Ok(())
     }
 
-    pub fn compare_all(&self, vec_r: &Vec<f32>, method: ComparisonMethods) -> Vec<f32> {
-        match method {
-            ComparisonMethods::Cosine => zip(&self.vectors, &self.norms)
-                .map(|(x, n)| self.cosine(x, n, vec_r))
-                .collect(),
-            ComparisonMethods::Euclidean => self
-                .vectors
-                .iter()
-                .map(|x| self.euclidean(x, vec_r))
-                .collect(),
+    pub fn add_vectors(&mut self, vectors: Vec<Vec<f32>>) -> Result<(), String> {
+        vectors.iter().try_for_each(|x| self.add_vector(x.to_vec()))
+    }
+
+    pub fn search_vec_cosine<'a>(
+        &'a self,
+        vec_r: &'a [f32],
+    ) -> VecSearchResult<impl Iterator<Item = (usize, f32)> + 'a> {
+        let vec_r_inv_norm = 1.0 / vec_r.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        // Initialize similarity scores for all vectors
+        let mut similarities = vec![0.0f32; self.n_vecs];
+
+        // Process each dimension across all vectors at once
+        for (dim_values, &query_val) in self.vectors.iter().zip(vec_r) {
+            for (vec_idx, &stored_val) in dim_values.iter().enumerate() {
+                similarities[vec_idx] += stored_val * query_val;
+            }
+        }
+
+        let iter = similarities
+            .into_iter()
+            .enumerate()
+            .zip(&self.inv_norms)
+            .map(move |((i, sim), &inv_norm)| (i, sim * inv_norm * vec_r_inv_norm));
+        VecSearchResult::new(iter)
+    }
+
+    pub fn search_vec_euclidean<'a>(
+        &'a self,
+        vec_r: &'a [f32],
+    ) -> VecSearchResult<impl Iterator<Item = (usize, f32)> + 'a> {
+        let mut dist = vec![0.0f32; self.n_vecs];
+
+        for (dim_values, &query_val) in self.vectors.iter().zip(vec_r) {
+            for (vec_idx, &stored_val) in dim_values.iter().enumerate() {
+                dist[vec_idx] += (stored_val - query_val).powi(2);
+            }
+        }
+        VecSearchResult::new(dist.into_iter().enumerate().map(|(i, d)| (i, d)))
+    }
+
+    pub fn take_min(
+        &self,
+        k: usize,
+        iter: impl Iterator<Item = (usize, f32)>,
+    ) -> Vec<(usize, f32)> {
+        take_min(k, iter)
+    }
+
+    pub fn take_max(
+        &self,
+        k: usize,
+        iter: impl Iterator<Item = (usize, f32)>,
+    ) -> Vec<(usize, f32)> {
+        take_max(k, iter)
+    }
+}
+
+pub fn take_min(k: usize, iter: impl Iterator<Item = (usize, f32)>) -> Vec<(usize, f32)> {
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let mut iter = iter;
+    let mut buffer: Vec<(usize, f32)> = Vec::with_capacity(k);
+
+    for _ in 0..k {
+        if let Some(item) = iter.next() {
+            buffer.push(item);
+        } else {
+            buffer.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            return buffer;
         }
     }
+
+    // Sort the initial buffer
+    buffer.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Process remaining elements
+    for (idx, val) in iter {
+        if val < buffer[k - 1].1 {
+            // Find insertion position using binary search
+            let pos = buffer
+                .binary_search_by(|probe| {
+                    probe
+                        .1
+                        .partial_cmp(&val)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|e| e);
+
+            // Insert and remove the last element
+            buffer.insert(pos, (idx, val));
+            buffer.pop();
+        }
+    }
+
+    buffer
+}
+
+pub fn take_max(k: usize, iter: impl Iterator<Item = (usize, f32)>) -> Vec<(usize, f32)> {
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let mut iter = iter;
+    let mut buffer: Vec<(usize, f32)> = Vec::with_capacity(k);
+
+    for _ in 0..k {
+        if let Some(item) = iter.next() {
+            buffer.push(item);
+        } else {
+            buffer.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            return buffer;
+        }
+    }
+
+    buffer.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (idx, val) in iter {
+        if val > buffer[k - 1].1 {
+            let pos = buffer
+                .binary_search_by(|probe| {
+                    val.partial_cmp(&probe.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|e| e);
+
+            buffer.insert(pos, (idx, val));
+            buffer.pop();
+        }
+    }
+
+    buffer
 }
