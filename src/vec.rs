@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 pub struct VecSearchResult<I>
 where
     I: Iterator<Item = (usize, f32)>,
@@ -72,14 +74,18 @@ impl RowAlignedVecs {
         vec_r: &'a [f32],
     ) -> VecSearchResult<impl Iterator<Item = (usize, f32)> + 'a> {
         let vec_r_inv_norm = 1.0 / vec_r.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let iter = self.vectors.iter().enumerate().zip(&self.inv_norms).map(
-            move |((i, vec_l), inv_norm_l)| {
-                let norm_factor = inv_norm_l * vec_r_inv_norm;
-                let similarity =
-                    vec_l.iter().zip(vec_r).map(|(x, y)| x * y).sum::<f32>() * norm_factor;
-                (i, similarity)
-            },
-        );
+
+        let iter = self.vectors.iter().enumerate().map(move |(i, vec_l)| {
+            let dot_product = vec_l
+                .iter()
+                .zip(vec_r.iter())
+                .map(|(&x, &y)| x * y)
+                .sum::<f32>();
+
+            let similarity = dot_product * self.inv_norms[i] * vec_r_inv_norm;
+            (i, similarity)
+        });
+
         VecSearchResult::new(iter)
     }
 
@@ -152,15 +158,19 @@ impl ColumnAlignedVecs {
     ) -> VecSearchResult<impl Iterator<Item = (usize, f32)> + 'a> {
         let vec_r_inv_norm = 1.0 / vec_r.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-        // Initialize similarity scores for all vectors
         let mut similarities = vec![0.0f32; self.n_vecs];
 
-        // Process each dimension across all vectors at once
-        for (dim_values, &query_val) in self.vectors.iter().zip(vec_r) {
-            for (vec_idx, &stored_val) in dim_values.iter().enumerate() {
-                similarities[vec_idx] += stored_val * query_val;
-            }
-        }
+        self.vectors
+            .iter()
+            .zip(vec_r.iter())
+            .for_each(|(dim_values, &query_val)| {
+                similarities
+                    .iter_mut()
+                    .zip(dim_values.iter())
+                    .for_each(|(sim, &stored_val)| {
+                        *sim += stored_val * query_val;
+                    });
+            });
 
         let iter = similarities
             .into_iter()
@@ -176,11 +186,18 @@ impl ColumnAlignedVecs {
     ) -> VecSearchResult<impl Iterator<Item = (usize, f32)> + 'a> {
         let mut dist = vec![0.0f32; self.n_vecs];
 
-        for (dim_values, &query_val) in self.vectors.iter().zip(vec_r) {
-            for (vec_idx, &stored_val) in dim_values.iter().enumerate() {
-                dist[vec_idx] += (stored_val - query_val).powi(2);
-            }
-        }
+        // Use iterator pattern for clean, functional style
+        self.vectors
+            .iter()
+            .zip(vec_r.iter())
+            .for_each(|(dim_values, &query_val)| {
+                dist.iter_mut()
+                    .zip(dim_values.iter())
+                    .for_each(|(distance, &stored_val)| {
+                        *distance += (stored_val - query_val).powi(2);
+                    });
+            });
+
         VecSearchResult::new(dist.into_iter().enumerate().map(|(i, d)| (i, d)))
     }
 
