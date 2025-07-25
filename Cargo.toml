@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 rand = "0.9.1"
+wide = "0.7.33"
 
 [profile.perf]
 inherits = "release"

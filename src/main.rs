@@ -1,6 +1,7 @@
 use rand::random_range;
 
 mod vec;
+use vec::TopKIterator;
 
 fn get_random_vec(dim: usize) -> Vec<f32> {
     let vec: Vec<f32> = (0..dim).map(|_| random_range(-1.0..1.0)).collect();
@@ -27,17 +28,13 @@ fn main() {
     let v = get_random_vectors(n_size, dim);
 
     let mut row_aligned_vecs = vec::RowAlignedVecs::new(dim);
-    let mut column_aligned_vecs = vec::ColumnAlignedVecs::new(dim);
 
     row_aligned_vecs.add_vectors(v.clone()).unwrap();
-    column_aligned_vecs.add_vectors(v.clone()).unwrap();
 
     let test_vec = get_random_vec(dim);
 
     let start_time = std::time::Instant::now();
-
     let top5_similarities = row_aligned_vecs.search_vec_cosine(&test_vec).take_max(5);
-
     println!(
         "Row Aligned Top 5 similarities: {:?} \n elapsed time: {:?}",
         top5_similarities,
@@ -45,12 +42,10 @@ fn main() {
     );
 
     let start_time = std::time::Instant::now();
-
-    let top5_similarities = column_aligned_vecs.search_vec_cosine(&test_vec).take_max(5);
-
+    let closest_vecs = row_aligned_vecs.search_vec_euclidean(&test_vec).take_min(5);
     println!(
-        "Column Aligned Top 5 similarities: {:?} \n elapsed time: {:?}",
-        top5_similarities,
+        "Row Aligned Top 5 closest vectors: {:?} \n elapsed time: {:?}",
+        closest_vecs,
         start_time.elapsed()
     );
 }
