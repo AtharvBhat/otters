@@ -244,9 +244,12 @@ impl<'a> VecQueryPlan<'a> {
                         let query_inv_norm = query_vectors_inv_norms[query_idx];
 
                         let score = match search_metric {
-                            Metric::Cosine => {
-                                cosine_similarity(query_vec, search_vec, query_inv_norm, search_inv_norm)
-                            }
+                            Metric::Cosine => cosine_similarity(
+                                query_vec,
+                                search_vec,
+                                query_inv_norm,
+                                search_inv_norm,
+                            ),
                             Metric::Euclidean => euclidean_distance_squared(query_vec, search_vec),
                         };
                         search_res[query_idx].push((search_idx, score));
@@ -348,58 +351,52 @@ impl VecStore {
     }
 }
 
+#[inline(always)]
 pub fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
-    let v1_chunks = vec1.chunks_exact(8);
-    let v2_chunks = vec2.chunks_exact(8);
-
-    let v1_rest = v1_chunks.remainder();
-    let v2_rest = v2_chunks.remainder();
-
-    let mut res = v1_chunks
-        .map(f32x8::from)
-        .zip(v2_chunks.map(f32x8::from))
-        .fold(f32x8::splat(0.0), |x, (a, b)| a.mul_add(b, x))
-        .reduce_add();
-
-    v1_rest.iter().zip(v2_rest).for_each(|(a, b)| {
-        res += a * b;
-    });
-
-    res
+    vec1.chunks_exact(8)
+        .zip(vec2.chunks_exact(8))
+        .map(|(v1, v2)| f32x8::from(v1) * f32x8::from(v2))
+        .fold(f32x8::splat(0.0), |acc, prod| acc + prod)
+        .reduce_add()
+        + vec1
+            .chunks_exact(8)
+            .remainder()
+            .iter()
+            .zip(vec2.chunks_exact(8).remainder())
+            .map(|(a, b)| a * b)
+            .sum::<f32>()
 }
 
+#[inline(always)]
 pub fn cosine_similarity(
     vec1: &[f32],
     vec2: &[f32],
     vec1_inv_norm: f32,
     vec2_inv_norm: f32,
 ) -> f32 {
-    let dot = dot_product(vec1, vec2);
-    dot * vec1_inv_norm * vec2_inv_norm
+    dot_product(vec1, vec2) * vec1_inv_norm * vec2_inv_norm
 }
 
+#[inline(always)]
 pub fn euclidean_distance_squared(vec1: &[f32], vec2: &[f32]) -> f32 {
-    let v1_chunks = vec1.chunks_exact(8);
-    let v2_chunks = vec2.chunks_exact(8);
-
-    let v1_rest = v1_chunks.remainder();
-    let v2_rest = v2_chunks.remainder();
-
-    let mut res = v1_chunks
-        .map(f32x8::from)
-        .zip(v2_chunks.map(f32x8::from))
-        .fold(f32x8::splat(0.0), |acc, (a, b)| {
-            let diff = a - b;
-            diff.mul_add(diff, acc)
+    vec1.chunks_exact(8)
+        .zip(vec2.chunks_exact(8))
+        .map(|(v1, v2)| {
+            let diff = f32x8::from(v1) - f32x8::from(v2);
+            diff * diff
         })
-        .reduce_add();
-
-    for (a, b) in v1_rest.iter().zip(v2_rest) {
-        let diff = a - b;
-        res += diff * diff;
-    }
-
-    res
+        .fold(f32x8::splat(0.0), |acc, squared| acc + squared)
+        .reduce_add()
+        + vec1
+            .chunks_exact(8)
+            .remainder()
+            .iter()
+            .zip(vec2.chunks_exact(8).remainder())
+            .map(|(a, b)| {
+                let diff = a - b;
+                diff * diff
+            })
+            .sum::<f32>()
 }
 
 pub fn update_top_k(

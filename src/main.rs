@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = std::time::Instant::now();
     let top5_similarities = store
         .query(test_vec.clone(), Metric::Cosine)
-        .filter(0.2, Cmp::Gt)
+        .filter(0.1, Cmp::Gt)
         .take(5)
         .collect()?;
 
