@@ -1,7 +1,7 @@
 use rand::random_range;
 
 mod vec;
-use vec::TopKIterator;
+use vec::{Metric, VecStore, Cmp};
 
 fn get_random_vec(dim: usize) -> Vec<f32> {
     let vec: Vec<f32> = (0..dim).map(|_| random_range(-1.0..1.0)).collect();
@@ -13,39 +13,48 @@ fn get_random_vectors(num_vecs: usize, dim: usize) -> Vec<Vec<f32>> {
     vec
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n_size: usize = std::env::args()
         .nth(1)
-        .expect("Need Number of vectors")
+        .unwrap_or_else(|| "1000".to_string())
         .parse()
-        .unwrap();
+        .unwrap_or(1000);
     let dim: usize = std::env::args()
         .nth(2)
-        .expect("Need dimension of vectors")
+        .unwrap_or_else(|| "100".to_string())
         .parse()
-        .unwrap();
+        .unwrap_or(100);
 
     let v = get_random_vectors(n_size, dim);
 
-    let mut row_aligned_vecs = vec::RowAlignedVecs::new(dim);
-
-    row_aligned_vecs.add_vectors(v.clone()).unwrap();
+    let mut store = VecStore::new(dim);
+    store.add_vectors(v.clone())?;
 
     let test_vec = get_random_vec(dim);
 
+    // Test cosine similarity search
     let start_time = std::time::Instant::now();
-    let top5_similarities = row_aligned_vecs.search_vec_cosine(&test_vec).take_max(5);
+    let top5_similarities = store
+        .query(test_vec.clone(), Metric::Cosine)
+        .filter(0.2, Cmp::Gt)
+        .take(5)
+        .collect()?;
+
     println!(
-        "Row Aligned Top 5 similarities: {:?} \n elapsed time: {:?}",
-        top5_similarities,
+        "Top 5 cosine similarities: {:?} \n elapsed time: {:?}",
+        top5_similarities[0],
         start_time.elapsed()
     );
 
-    let start_time = std::time::Instant::now();
-    let closest_vecs = row_aligned_vecs.search_vec_euclidean(&test_vec).take_min(5);
-    println!(
-        "Row Aligned Top 5 closest vectors: {:?} \n elapsed time: {:?}",
-        closest_vecs,
-        start_time.elapsed()
-    );
+    // // Test euclidean distance search
+    // let start_time = std::time::Instant::now();
+    // let closest_5 = store.query(test_vec, Metric::Euclidean).take(5).collect()?;
+
+    // println!(
+    //     "Top 5 closest vectors: {:?} \n elapsed time: {:?}",
+    //     closest_5[0],
+    //     start_time.elapsed()
+    // );
+
+    Ok(())
 }
