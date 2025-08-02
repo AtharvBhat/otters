@@ -1,25 +1,26 @@
 #![allow(unused)]
 use wide::*;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Metric {
     Cosine,
     Euclidean,
+    DotProduct,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum TakeType {
     Min,
     Max,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum TakeScope {
     Local,
     Global,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Cmp {
     Lt,
     Gt,
@@ -72,6 +73,7 @@ impl<'a> VecQueryPlan<'a> {
         match self.search_metric {
             Some(Metric::Cosine) => self.take_type = Some(TakeType::Max),
             Some(Metric::Euclidean) => self.take_type = Some(TakeType::Min),
+            Some(Metric::DotProduct) => self.take_type = Some(TakeType::Max),
             None => {}
         }
         self
@@ -86,12 +88,13 @@ impl<'a> VecQueryPlan<'a> {
         match self.search_metric {
             Some(Metric::Cosine) => self.take_type = Some(TakeType::Max),
             Some(Metric::Euclidean) => self.take_type = Some(TakeType::Min),
+            Some(Metric::DotProduct) => self.take_type = Some(TakeType::Max),
             None => {}
         }
         self
     }
 
-    pub fn take_closest(mut self, count: usize) -> Self {
+    pub fn take_min(mut self, count: usize) -> Self {
         if self.error.is_some() {
             return self;
         }
@@ -101,7 +104,7 @@ impl<'a> VecQueryPlan<'a> {
         self
     }
 
-    pub fn take_closest_global(mut self, count: usize) -> Self {
+    pub fn take_min_global(mut self, count: usize) -> Self {
         if self.error.is_some() {
             return self;
         }
@@ -111,7 +114,7 @@ impl<'a> VecQueryPlan<'a> {
         self
     }
 
-    pub fn take_farthest(mut self, count: usize) -> Self {
+    pub fn take_max(mut self, count: usize) -> Self {
         if self.error.is_some() {
             return self;
         }
@@ -121,7 +124,7 @@ impl<'a> VecQueryPlan<'a> {
         self
     }
 
-    pub fn take_farthest_global(mut self, count: usize) -> Self {
+    pub fn take_max_global(mut self, count: usize) -> Self {
         if self.error.is_some() {
             return self;
         }
@@ -241,16 +244,15 @@ impl<'a> VecQueryPlan<'a> {
                     .iter()
                     .enumerate()
                     .for_each(|(query_idx, query_vec)| {
-                        let query_inv_norm = query_vectors_inv_norms[query_idx];
-
                         let score = match search_metric {
                             Metric::Cosine => cosine_similarity(
                                 query_vec,
                                 search_vec,
-                                query_inv_norm,
+                                query_vectors_inv_norms[query_idx],
                                 search_inv_norm,
                             ),
                             Metric::Euclidean => euclidean_distance_squared(query_vec, search_vec),
+                            Metric::DotProduct => dot_product(query_vec, search_vec),
                         };
                         search_res[query_idx].push((search_idx, score));
                     });

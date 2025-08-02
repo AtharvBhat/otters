@@ -1,7 +1,7 @@
 use rand::random_range;
 
 mod vec;
-use vec::{Metric, VecStore, Cmp};
+use vec::{Cmp, Metric, VecStore};
 
 fn get_random_vec(dim: usize) -> Vec<f32> {
     let vec: Vec<f32> = (0..dim).map(|_| random_range(-1.0..1.0)).collect();
@@ -46,15 +46,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         start_time.elapsed()
     );
 
-    // // Test euclidean distance search
-    // let start_time = std::time::Instant::now();
-    // let closest_5 = store.query(test_vec, Metric::Euclidean).take(5).collect()?;
+    // Test euclidean distance search
+    let start_time = std::time::Instant::now();
+    let closest_5 = store
+        .query(test_vec, Metric::Euclidean)
+        .filter(300.0, Cmp::Lt)
+        .take(5)
+        .collect()?;
 
-    // println!(
-    //     "Top 5 closest vectors: {:?} \n elapsed time: {:?}",
-    //     closest_5[0],
-    //     start_time.elapsed()
-    // );
+    println!(
+        "Top 5 closest vectors: {:?} \n elapsed time: {:?}",
+        closest_5[0],
+        start_time.elapsed()
+    );
 
     Ok(())
 }

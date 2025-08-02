@@ -91,7 +91,7 @@ fn test_error_propagation_through_chain() {
         .query(query, Metric::Cosine)
         .filter(0.5, Cmp::Gt) // This should not execute due to error
         .take(5) // This should not execute due to error
-        .take_closest(3) // This should not execute due to error
+        .take_min(3) // This should not execute due to error
         .collect();
 
     assert!(result.is_err());
@@ -215,7 +215,7 @@ fn test_euclidean_distance_basic() {
     let query = vec![1.0, 0.0, 0.0];
     let results = store
         .query(query, Metric::Euclidean)
-        .take_closest(5)
+        .take_min(5)
         .collect()
         .unwrap();
 
@@ -272,7 +272,7 @@ fn test_top_k_euclidean() {
     // Test euclidean distance closest-2
     let results = store
         .query(query, Metric::Euclidean)
-        .take_closest(2)
+        .take_min(2)
         .collect()
         .unwrap();
 
@@ -562,7 +562,7 @@ fn test_euclidean_distance_correctness() {
     let query = vec![0.0, 0.0];
     let results = store
         .query(query, Metric::Euclidean)
-        .take_closest(5)
+        .take_min(5)
         .collect()
         .unwrap();
 
@@ -664,7 +664,7 @@ fn test_euclidean_ranking_correctness() {
     let query = vec![0.0, 0.0];
     let results = store
         .query(query, Metric::Euclidean)
-        .take_closest(6)
+        .take_min(6)
         .collect()
         .unwrap();
 
@@ -825,7 +825,7 @@ fn test_api_design_showcase() -> Result<(), String> {
     let results = store
         .query(query, Metric::Cosine)
         .filter(0.8, Cmp::Gt) // Only high similarities
-        .take_closest(10) // Get 10 closest
+        .take_min(10) // Get 10 closest
         .collect()?; // Only error handling point
 
     assert_eq!(results.len(), 1); // Single query
@@ -850,7 +850,7 @@ fn test_error_in_chain_stops_execution() {
         .query(query, Metric::Cosine)
         .filter(0.5, Cmp::Gt)
         .take(10)
-        .take_closest(5); // This overrides the previous take
+        .take_min(5); // This overrides the previous take
 
     // Error only surfaces when we try to collect
     let result = plan.collect();
@@ -900,19 +900,19 @@ fn test_error_propagation_in_take_methods() {
     assert!(plan2.collect().is_err());
 
     let plan = VecQueryPlan::new();
-    let plan3 = plan.take_closest(5);
+    let plan3 = plan.take_min(5);
     assert!(plan3.collect().is_err());
 
     let plan = VecQueryPlan::new();
-    let plan4 = plan.take_closest_global(5);
+    let plan4 = plan.take_min_global(5);
     assert!(plan4.collect().is_err());
 
     let plan = VecQueryPlan::new();
-    let plan5 = plan.take_farthest(5);
+    let plan5 = plan.take_max(5);
     assert!(plan5.collect().is_err());
 
     let plan = VecQueryPlan::new();
-    let plan6 = plan.take_farthest_global(5);
+    let plan6 = plan.take_max_global(5);
     assert!(plan6.collect().is_err());
 }
 
@@ -1097,7 +1097,7 @@ fn test_take_closest_and_farthest_methods() {
     // Test take_closest - should prioritize smaller distances
     let results = store
         .query(query.clone(), Metric::Euclidean)
-        .take_closest(2)
+        .take_min(2)
         .collect()
         .unwrap();
     assert_eq!(results[0].len(), 2);
@@ -1105,7 +1105,7 @@ fn test_take_closest_and_farthest_methods() {
     // Test take_farthest - should prioritize larger distances
     let results = store
         .query(query.clone(), Metric::Euclidean)
-        .take_farthest(2)
+        .take_max(2)
         .collect()
         .unwrap();
     assert_eq!(results[0].len(), 2);
@@ -1114,7 +1114,7 @@ fn test_take_closest_and_farthest_methods() {
     let queries = vec![query.clone(), vec![0.0, 1.0]];
     let results = store
         .query(queries, Metric::Euclidean)
-        .take_closest_global(1)
+        .take_min_global(1)
         .collect()
         .unwrap();
     assert_eq!(results.len(), 1); // Global scope
@@ -1124,7 +1124,7 @@ fn test_take_closest_and_farthest_methods() {
     let queries = vec![query, vec![0.0, 1.0]];
     let results = store
         .query(queries, Metric::Euclidean)
-        .take_farthest_global(1)
+        .take_max_global(1)
         .collect()
         .unwrap();
     assert_eq!(results.len(), 1); // Global scope
@@ -1169,8 +1169,8 @@ fn test_error_states_in_chained_operations() {
         .filter(0.5, Cmp::Gt)
         .take(5)
         .take_global(3)
-        .take_closest(2)
-        .take_farthest(1);
+        .take_min(2)
+        .take_max(1);
 
     let result = final_plan.collect();
     assert!(result.is_err());
