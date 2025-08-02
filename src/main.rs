@@ -1,7 +1,5 @@
+use otters::prelude::*;
 use rand::random_range;
-
-mod vec;
-use vec::{Cmp, Metric, VecStore};
 
 fn get_random_vec(dim: usize) -> Vec<f32> {
     let vec: Vec<f32> = (0..dim).map(|_| random_range(-1.0..1.0)).collect();

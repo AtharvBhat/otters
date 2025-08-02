@@ -1,4 +1,6 @@
 #![allow(unused)]
+use crate::vec_compute::{TopKCollector, calculate_scores_chunk};
+pub use crate::vec_compute::{cosine_similarity, dot_product, euclidean_distance_squared};
 use wide::*;
 
 #[derive(Debug)]
@@ -20,7 +22,7 @@ pub enum TakeScope {
     Global,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Cmp {
     Lt,
     Gt,
@@ -169,107 +171,107 @@ impl<'a> VecQueryPlan<'a> {
         Ok(())
     }
 
-    fn filter_scores<'b>(&self, mut scores: &'b mut Vec<(usize, f32)>) -> &'b Vec<(usize, f32)> {
-        if let Some((threshold, cmp)) = &self.filter_criteria {
-            scores.retain(|&(_, score)| match cmp {
-                Cmp::Lt => score < *threshold,
-                Cmp::Gt => score > *threshold,
-                Cmp::Leq => score <= *threshold,
-                Cmp::Geq => score >= *threshold,
-                Cmp::Eq => score == *threshold,
-            });
-        }
-        scores
-    }
-
-    fn filter_and_merge_results(
-        &self,
-        results: &mut Vec<Vec<(usize, f32)>>,
-        local_results: &mut Vec<Vec<(usize, f32)>>,
-    ) {
-        results.iter_mut().enumerate().for_each(|(i, result)| {
-            let filtered_res = match self.filter_criteria {
-                None => &local_results[i],
-                Some(_) => self.filter_scores(&mut local_results[i]),
-            };
-            filtered_res.iter().for_each(|res| {
-                update_top_k(
-                    result,
-                    *res,
-                    self.take_count.unwrap(),
-                    self.take_type.as_ref().unwrap(),
-                );
-            });
-        });
-    }
-
-    fn merge_results_to_global(&self, results: &Vec<Vec<(usize, f32)>>) -> Vec<(usize, f32)> {
-        let mut merged_results: Vec<(usize, f32)> = Vec::new();
-        results.iter().for_each(|ress| {
-            ress.iter().for_each(|res| {
-                update_top_k(
-                    &mut merged_results,
-                    *res,
-                    self.take_count.unwrap(),
-                    self.take_type.as_ref().unwrap(),
-                );
-            });
-        });
-        merged_results
-    }
-
     pub fn collect(self) -> Result<Vec<Vec<(usize, f32)>>, String> {
         self.validate()?;
 
-        let search_vectors: &[Vec<f32>] = self.vector_store.unwrap().vectors.as_ref();
-        let search_vectors_inv_norms: &[f32] = self.vector_store.unwrap().inv_norms.as_ref();
+        let vector_store = self.vector_store.unwrap();
         let query_vectors = self.query_vectors.as_ref().unwrap();
         let query_vectors_inv_norms = self.query_vectors_inv_norms.as_ref().unwrap();
         let search_metric = self.search_metric.as_ref().unwrap();
+        let take_count = self.take_count.unwrap_or(vector_store.n_vecs);
+        let take_type = self.take_type.as_ref().unwrap_or(&TakeType::Max);
+        let num_queries = query_vectors.len();
 
-        let mut results = match &self.take_count {
-            None => vec![Vec::new(); query_vectors.len()],
-            Some(count) => {
-                vec![Vec::with_capacity(*count); query_vectors.len()]
-            }
+        // Initialize collectors
+        let mut collectors: Vec<TopKCollector> = match self.take_scope {
+            TakeScope::Global => vec![TopKCollector::new(
+                take_count,
+                take_type,
+                self.filter_criteria.as_ref(),
+            )],
+            TakeScope::Local => (0..num_queries)
+                .map(|_| TopKCollector::new(take_count, take_type, self.filter_criteria.as_ref()))
+                .collect(),
         };
 
-        search_vectors
-            .iter()
+        // Process chunks
+        let vec_chunks = vector_store.vectors.chunks_exact(8);
+        let inv_chunks = vector_store.inv_norms.chunks_exact(8);
+
+        vec_chunks
+            .zip(inv_chunks)
             .enumerate()
-            .for_each(|(search_idx, search_vec)| {
-                let search_inv_norm = search_vectors_inv_norms[search_idx];
-                let mut search_res = vec![Vec::new(); query_vectors.len()];
-                query_vectors
-                    .iter()
-                    .enumerate()
-                    .for_each(|(query_idx, query_vec)| {
-                        let score = match search_metric {
-                            Metric::Cosine => cosine_similarity(
-                                query_vec,
-                                search_vec,
-                                query_vectors_inv_norms[query_idx],
-                                search_inv_norm,
-                            ),
-                            Metric::Euclidean => euclidean_distance_squared(query_vec, search_vec),
-                            Metric::DotProduct => dot_product(query_vec, search_vec),
-                        };
-                        search_res[query_idx].push((search_idx, score));
-                    });
-                self.filter_and_merge_results(&mut results, &mut search_res);
+            .for_each(|(chunk_idx, (vec_chunk, inv_chunk))| {
+                // Calculate scores for all queries for this chunk
+                let scores_per_query = calculate_scores_chunk(
+                    query_vectors,
+                    query_vectors_inv_norms,
+                    vec_chunk,
+                    inv_chunk,
+                    search_metric,
+                );
+
+                // Push to appropriate collectors
+                match self.take_scope {
+                    TakeScope::Global => {
+                        scores_per_query.into_iter().for_each(|scores| {
+                            collectors[0].push_chunk(chunk_idx, scores);
+                        });
+                    }
+                    TakeScope::Local => {
+                        scores_per_query
+                            .into_iter()
+                            .enumerate()
+                            .for_each(|(q_idx, scores)| {
+                                collectors[q_idx].push_chunk(chunk_idx, scores);
+                            });
+                    }
+                }
             });
 
-        match self.take_scope {
-            TakeScope::Global => {
-                let merged_results = self.merge_results_to_global(&results);
-                results = vec![merged_results];
-            }
-            _ => {}
+        // Process remainder
+        let remainder_start = (vector_store.n_vecs / 8) * 8;
+        if remainder_start < vector_store.n_vecs {
+            let remainder_vecs = &vector_store.vectors[remainder_start..];
+            let remainder_inv_norms = &vector_store.inv_norms[remainder_start..];
+
+            query_vectors
+                .iter()
+                .zip(query_vectors_inv_norms.iter())
+                .enumerate()
+                .for_each(|(q_idx, (query, &query_inv_norm))| {
+                    // Collect remainder scores
+                    let remainder_scores: Vec<(usize, f32)> = remainder_vecs
+                        .iter()
+                        .zip(remainder_inv_norms.iter())
+                        .enumerate()
+                        .map(|(i, (vec, &inv_norm))| {
+                            let score = match search_metric {
+                                Metric::Cosine => {
+                                    cosine_similarity(query, vec, query_inv_norm, inv_norm)
+                                }
+                                Metric::Euclidean => euclidean_distance_squared(query, vec),
+                                Metric::DotProduct => dot_product(query, vec),
+                            };
+                            (remainder_start + i, score)
+                        })
+                        .collect();
+
+                    // Push to appropriate collector
+                    match self.take_scope {
+                        TakeScope::Global => collectors[0].push_scalars(remainder_scores),
+                        TakeScope::Local => collectors[q_idx].push_scalars(remainder_scores),
+                    }
+                });
         }
-        Ok(results)
+
+        // Return results
+        Ok(collectors
+            .into_iter()
+            .map(|c| c.into_sorted_vec())
+            .collect())
     }
 }
-
 // Convenience trait to accept both single and batch queries
 pub struct QueryBatch {
     queries: Vec<Vec<f32>>,
@@ -350,95 +352,5 @@ impl VecStore {
             vector_store: Some(self),
             error: None,
         }
-    }
-}
-
-#[inline(always)]
-pub fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
-    vec1.chunks_exact(8)
-        .zip(vec2.chunks_exact(8))
-        .map(|(v1, v2)| f32x8::from(v1) * f32x8::from(v2))
-        .fold(f32x8::splat(0.0), |acc, prod| acc + prod)
-        .reduce_add()
-        + vec1
-            .chunks_exact(8)
-            .remainder()
-            .iter()
-            .zip(vec2.chunks_exact(8).remainder())
-            .map(|(a, b)| a * b)
-            .sum::<f32>()
-}
-
-#[inline(always)]
-pub fn cosine_similarity(
-    vec1: &[f32],
-    vec2: &[f32],
-    vec1_inv_norm: f32,
-    vec2_inv_norm: f32,
-) -> f32 {
-    dot_product(vec1, vec2) * vec1_inv_norm * vec2_inv_norm
-}
-
-#[inline(always)]
-pub fn euclidean_distance_squared(vec1: &[f32], vec2: &[f32]) -> f32 {
-    vec1.chunks_exact(8)
-        .zip(vec2.chunks_exact(8))
-        .map(|(v1, v2)| {
-            let diff = f32x8::from(v1) - f32x8::from(v2);
-            diff * diff
-        })
-        .fold(f32x8::splat(0.0), |acc, squared| acc + squared)
-        .reduce_add()
-        + vec1
-            .chunks_exact(8)
-            .remainder()
-            .iter()
-            .zip(vec2.chunks_exact(8).remainder())
-            .map(|(a, b)| {
-                let diff = a - b;
-                diff * diff
-            })
-            .sum::<f32>()
-}
-
-pub fn update_top_k(
-    current: &mut Vec<(usize, f32)>,
-    new_entry: (usize, f32),
-    k: usize,
-    cmp: &TakeType,
-) {
-    if k == 0 {
-        return;
-    }
-
-    // If we haven't reached k items yet, just add and sort
-    if current.len() < k {
-        current.push(new_entry);
-
-        // Sort when we reach capacity or at the end
-        match cmp {
-            TakeType::Min => current.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap()),
-            TakeType::Max => current.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap()),
-        }
-        return;
-    }
-
-    // We have k items - check if new entry should be inserted
-    let should_insert = match cmp {
-        TakeType::Min => new_entry.1 < current[k - 1].1,
-        TakeType::Max => new_entry.1 > current[k - 1].1,
-    };
-
-    if should_insert {
-        // Binary search for insertion position
-        let pos = current
-            .binary_search_by(|probe| match cmp {
-                TakeType::Min => probe.1.partial_cmp(&new_entry.1).unwrap(),
-                TakeType::Max => new_entry.1.partial_cmp(&probe.1).unwrap(),
-            })
-            .unwrap_or_else(|e| e);
-
-        current.insert(pos, new_entry);
-        current.pop(); // Remove the worst element
     }
 }

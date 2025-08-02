@@ -228,6 +228,221 @@ fn test_euclidean_distance_basic() {
 }
 
 // ============================================================================
+// Dot Product Tests
+// ============================================================================
+
+#[test]
+fn test_dot_product_basic() {
+    let mut store = VecStore::new(3);
+    let test_vectors = create_test_vectors();
+    store.add_vectors(test_vectors.clone()).unwrap();
+
+    // Query with the first vector (should have max dot product with itself)
+    let query = vec![1.0, 0.0, 0.0];
+    let results = store
+        .query(query, Metric::DotProduct)
+        .take(5)
+        .collect()
+        .unwrap();
+
+    // Should return results for the single query
+    assert_eq!(results.len(), 1);
+
+    // Check that the dot product with itself is 1.0 (since query vector has norm 1)
+    let self_dot_product = results[0].iter().find(|(idx, _)| *idx == 0).unwrap();
+    assert!((self_dot_product.1 - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_dot_product_orthogonal_vectors() {
+    let mut store = VecStore::new(2);
+
+    // Add orthogonal vectors
+    store.add_vector(vec![1.0, 0.0]).unwrap();
+    store.add_vector(vec![0.0, 1.0]).unwrap();
+    store.add_vector(vec![2.0, 0.0]).unwrap(); // parallel but scaled
+    store.add_vector(vec![-1.0, 0.0]).unwrap(); // opposite direction
+
+    let query = vec![1.0, 0.0];
+    let results = store
+        .query(query, Metric::DotProduct)
+        .take(4)
+        .collect()
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].len(), 4);
+
+    // Find specific vectors and their dot products
+    let identical = results[0].iter().find(|(idx, _)| *idx == 0).unwrap();
+    let orthogonal = results[0].iter().find(|(idx, _)| *idx == 1).unwrap();
+    let scaled = results[0].iter().find(|(idx, _)| *idx == 2).unwrap();
+    let opposite = results[0].iter().find(|(idx, _)| *idx == 3).unwrap();
+
+    // Identical vector should have dot product 1.0
+    assert!((identical.1 - 1.0).abs() < 1e-6);
+
+    // Orthogonal vector should have dot product 0.0
+    assert!(orthogonal.1.abs() < 1e-6);
+
+    // Scaled parallel vector should have dot product 2.0
+    assert!((scaled.1 - 2.0).abs() < 1e-6);
+
+    // Opposite vector should have dot product -1.0
+    assert!((opposite.1 - (-1.0)).abs() < 1e-6);
+}
+
+#[test]
+fn test_dot_product_ranking() {
+    let mut store = VecStore::new(2);
+
+    // Add vectors with known dot products with query [3.0, 4.0]
+    store.add_vector(vec![3.0, 4.0]).unwrap(); // dot product = 9 + 16 = 25 (index 0)
+    store.add_vector(vec![1.0, 1.0]).unwrap(); // dot product = 3 + 4 = 7 (index 1)
+    store.add_vector(vec![0.0, 1.0]).unwrap(); // dot product = 0 + 4 = 4 (index 2)
+    store.add_vector(vec![-1.0, 0.0]).unwrap(); // dot product = -3 + 0 = -3 (index 3)
+
+    let query = vec![3.0, 4.0];
+    let results = store
+        .query(query, Metric::DotProduct)
+        .take(4)
+        .collect()
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].len(), 4);
+
+    // Results should be sorted by dot product (highest first)
+    assert!(results[0][0].1 >= results[0][1].1);
+    assert!(results[0][1].1 >= results[0][2].1);
+    assert!(results[0][2].1 >= results[0][3].1);
+
+    // Check specific dot product values
+    assert!((results[0][0].1 - 25.0).abs() < 1e-6); // highest dot product
+    assert!((results[0][3].1 - (-3.0)).abs() < 1e-6); // lowest dot product
+}
+
+#[test]
+fn test_dot_product_filtering() {
+    let mut store = VecStore::new(2);
+
+    // Add vectors with known dot products with query [1.0, 0.0]
+    store.add_vector(vec![2.0, 0.0]).unwrap(); // dot product = 2.0
+    store.add_vector(vec![1.0, 0.0]).unwrap(); // dot product = 1.0
+    store.add_vector(vec![0.5, 0.0]).unwrap(); // dot product = 0.5
+    store.add_vector(vec![-1.0, 0.0]).unwrap(); // dot product = -1.0
+
+    let query = vec![1.0, 0.0];
+
+    // Filter for dot products > 1.0
+    let results = store
+        .query(query, Metric::DotProduct)
+        .filter(1.0, Cmp::Gt)
+        .take(10)
+        .collect()
+        .unwrap();
+
+    assert_eq!(results.len(), 1); // Single query
+
+    // Should only return vectors with dot product > 1.0
+    for (_, dot_product) in &results[0] {
+        assert!(*dot_product > 1.0);
+    }
+    
+    // Should return only one vector (the one with dot product 2.0)
+    assert_eq!(results[0].len(), 1);
+    assert!((results[0][0].1 - 2.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_dot_product_take_max() {
+    let mut store = VecStore::new(2);
+
+    // Add vectors with different dot products
+    store.add_vector(vec![1.0, 0.0]).unwrap(); // dot product = 1.0
+    store.add_vector(vec![2.0, 0.0]).unwrap(); // dot product = 2.0
+    store.add_vector(vec![0.5, 0.0]).unwrap(); // dot product = 0.5
+    store.add_vector(vec![-1.0, 0.0]).unwrap(); // dot product = -1.0
+
+    let query = vec![1.0, 0.0];
+
+    // Test take_max explicitly
+    let results = store
+        .query(query, Metric::DotProduct)
+        .take_max(2)
+        .collect()
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].len(), 2);
+
+    // Should return the 2 highest dot products (2.0 and 1.0)
+    assert!((results[0][0].1 - 2.0).abs() < 1e-6);
+    assert!((results[0][1].1 - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_dot_product_take_min() {
+    let mut store = VecStore::new(2);
+
+    // Add vectors with different dot products
+    store.add_vector(vec![1.0, 0.0]).unwrap(); // dot product = 1.0
+    store.add_vector(vec![2.0, 0.0]).unwrap(); // dot product = 2.0
+    store.add_vector(vec![0.5, 0.0]).unwrap(); // dot product = 0.5
+    store.add_vector(vec![-1.0, 0.0]).unwrap(); // dot product = -1.0
+
+    let query = vec![1.0, 0.0];
+
+    // Test take_min explicitly
+    let results = store
+        .query(query, Metric::DotProduct)
+        .take_min(2)
+        .collect()
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].len(), 2);
+
+    // Should return the 2 lowest dot products (-1.0 and 0.5)
+    assert!((results[0][0].1 - (-1.0)).abs() < 1e-6);
+    assert!((results[0][1].1 - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn test_dot_product_batch_queries() {
+    let mut store = VecStore::new(2);
+
+    // Add test vectors
+    store.add_vector(vec![1.0, 0.0]).unwrap();
+    store.add_vector(vec![0.0, 1.0]).unwrap();
+    store.add_vector(vec![1.0, 1.0]).unwrap();
+
+    let queries = vec![
+        vec![1.0, 0.0], // Should have max dot product with first vector
+        vec![0.0, 1.0], // Should have max dot product with second vector
+    ];
+
+    let results = store
+        .query(queries, Metric::DotProduct)
+        .take(2)
+        .collect()
+        .unwrap();
+
+    assert_eq!(results.len(), 2); // Two queries
+
+    // Each query should return 2 results
+    for query_results in &results {
+        assert_eq!(query_results.len(), 2);
+    }
+
+    // First query should have highest dot product with first vector (1.0)
+    assert!((results[0][0].1 - 1.0).abs() < 1e-6);
+
+    // Second query should have highest dot product with second vector (1.0)
+    assert!((results[1][0].1 - 1.0).abs() < 1e-6);
+}
+
+// ============================================================================
 // Top-K Selection Tests
 // ============================================================================
 
@@ -594,6 +809,99 @@ fn test_euclidean_distance_correctness() {
         (negative.1 - 25.0).abs() < 1e-6,
         "Negative coordinates should have squared distance 25"
     );
+}
+
+#[test]
+fn test_dot_product_correctness() {
+    let mut store = VecStore::new(3);
+
+    // Add vectors with known dot products with query [2.0, 3.0, 1.0]
+    store.add_vector(vec![2.0, 3.0, 1.0]).unwrap(); // dot product = 4 + 9 + 1 = 14 (identical)
+    store.add_vector(vec![1.0, 0.0, 0.0]).unwrap(); // dot product = 2 + 0 + 0 = 2
+    store.add_vector(vec![0.0, 1.0, 0.0]).unwrap(); // dot product = 0 + 3 + 0 = 3
+    store.add_vector(vec![0.0, 0.0, 1.0]).unwrap(); // dot product = 0 + 0 + 1 = 1
+    store.add_vector(vec![-1.0, 0.0, 0.0]).unwrap(); // dot product = -2 + 0 + 0 = -2
+    store.add_vector(vec![1.0, 1.0, 1.0]).unwrap(); // dot product = 2 + 3 + 1 = 6
+
+    let query = vec![2.0, 3.0, 1.0];
+    let results = store
+        .query(query, Metric::DotProduct)
+        .take(6)
+        .collect()
+        .unwrap();
+
+    // Verify all dot products are mathematically correct
+    let mut found_results = vec![false; 6];
+    
+    for (idx, dot_product) in &results[0] {
+        match *idx {
+            0 => {
+                assert!(
+                    (dot_product - 14.0).abs() < 1e-6,
+                    "Identical vector should have dot product 14.0, got {}",
+                    dot_product
+                );
+                found_results[0] = true;
+            }
+            1 => {
+                assert!(
+                    (dot_product - 2.0).abs() < 1e-6,
+                    "Unit x vector should have dot product 2.0, got {}",
+                    dot_product
+                );
+                found_results[1] = true;
+            }
+            2 => {
+                assert!(
+                    (dot_product - 3.0).abs() < 1e-6,
+                    "Unit y vector should have dot product 3.0, got {}",
+                    dot_product
+                );
+                found_results[2] = true;
+            }
+            3 => {
+                assert!(
+                    (dot_product - 1.0).abs() < 1e-6,
+                    "Unit z vector should have dot product 1.0, got {}",
+                    dot_product
+                );
+                found_results[3] = true;
+            }
+            4 => {
+                assert!(
+                    (dot_product - (-2.0)).abs() < 1e-6,
+                    "Negative x vector should have dot product -2.0, got {}",
+                    dot_product
+                );
+                found_results[4] = true;
+            }
+            5 => {
+                assert!(
+                    (dot_product - 6.0).abs() < 1e-6,
+                    "Ones vector should have dot product 6.0, got {}",
+                    dot_product
+                );
+                found_results[5] = true;
+            }
+            _ => panic!("Unexpected index {}", idx),
+        }
+    }
+
+    // Verify all vectors were found
+    for (i, found) in found_results.iter().enumerate() {
+        assert!(*found, "Vector at index {} not found in results", i);
+    }
+
+    // Verify results are sorted in descending order of dot product
+    let dot_products: Vec<f32> = results[0].iter().map(|(_, dp)| *dp).collect();
+    for i in 1..dot_products.len() {
+        assert!(
+            dot_products[i-1] >= dot_products[i],
+            "Results should be sorted in descending order: {} should be >= {}",
+            dot_products[i-1],
+            dot_products[i]
+        );
+    }
 }
 
 #[test]
