@@ -348,7 +348,7 @@ fn test_dot_product_filtering() {
     for (_, dot_product) in &results[0] {
         assert!(*dot_product > 1.0);
     }
-    
+
     // Should return only one vector (the one with dot product 2.0)
     assert_eq!(results[0].len(), 1);
     assert!((results[0][0].1 - 2.0).abs() < 1e-6);
@@ -832,7 +832,7 @@ fn test_dot_product_correctness() {
 
     // Verify all dot products are mathematically correct
     let mut found_results = vec![false; 6];
-    
+
     for (idx, dot_product) in &results[0] {
         match *idx {
             0 => {
@@ -896,9 +896,9 @@ fn test_dot_product_correctness() {
     let dot_products: Vec<f32> = results[0].iter().map(|(_, dp)| *dp).collect();
     for i in 1..dot_products.len() {
         assert!(
-            dot_products[i-1] >= dot_products[i],
+            dot_products[i - 1] >= dot_products[i],
             "Results should be sorted in descending order: {} should be >= {}",
-            dot_products[i-1],
+            dot_products[i - 1],
             dot_products[i]
         );
     }
