@@ -107,15 +107,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test euclidean distance search
     let start_time = std::time::Instant::now();
-    let closest_5 = store
-        .query(test_vec, Metric::Euclidean)
-        .filter(300.0, Cmp::Lt)
-        .take(5)
+
+    // You can also prebuild a query plan and then use it with a vector store
+    let closest_5_query = VecQueryPlan::new()
+        .with_query_vectors(vec![get_random_vec(dim), get_random_vec(dim)])
+        .with_metric(Metric::Euclidean)
+        .filter(400.0, Cmp::Lt)
+        .take_global(5);
+
+    let closest_5 = closest_5_query.with_vector_store(&store).collect()?;
+
+    println!(
+        "Top 5 closest vectors (BATCH): {:?} \n elapsed time: {:?}",
+        closest_5,
+        start_time.elapsed()
+    );
+
+    let start_time = std::time::Instant::now();
+
+    // You can also prebuild a query plan without any query vectors
+    // and then use it with an incoming query vector when you have one.
+    let farthest_5_query = VecQueryPlan::new()
+        .with_vector_store(&store)
+        .with_metric(Metric::Cosine)
+        .take_min(5);
+
+    // Use your query vectors and execute when you are ready
+    let farthest_5 = farthest_5_query
+        .with_query_vectors(get_random_vec(dim))
         .collect()?;
 
     println!(
-        "Top 5 closest vectors: {:?} \n elapsed time: {:?}",
-        closest_5[0],
+        "Top 5 Farthest vectors: {:?} \n elapsed time: {:?}",
+        farthest_5,
         start_time.elapsed()
     );
 

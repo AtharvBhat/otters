@@ -59,6 +59,41 @@ impl<'a> VecQueryPlan<'a> {
         }
     }
 
+    pub fn with_vector_store(mut self, store: &'a VecStore) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+        self.vector_store = Some(store);
+        self
+    }
+
+    pub fn with_query_vectors(mut self, queries: impl Into<QueryBatch>) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+        let query_batch = queries.into();
+
+        let inv_norms: Vec<f32> = query_batch
+            .queries
+            .iter()
+            .map(|vec| {
+                let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                1.0 / norm
+            })
+            .collect();
+        self.query_vectors = Some(query_batch.queries);
+        self.query_vectors_inv_norms = Some(inv_norms);
+        self
+    }
+
+    pub fn with_metric(mut self, metric: Metric) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+        self.search_metric = Some(metric);
+        self
+    }
+
     pub fn filter(mut self, score: f32, cmp: Cmp) -> Self {
         if self.error.is_some() {
             return self;
