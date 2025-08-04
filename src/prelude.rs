@@ -15,3 +15,6 @@ pub use crate::vec::{Cmp, Metric, TakeScope, TakeType};
 
 // Commonly used compute functions
 pub use crate::vec::{cosine_similarity, dot_product, euclidean_distance_squared};
+
+// Column functionality
+pub use crate::col;

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitvec = "1.0.1"
+chrono = "0.4.41"
 rand = "0.9.1"
 wide = "0.7.33"
 

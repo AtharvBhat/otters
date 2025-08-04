@@ -1,3 +1,4 @@
+use otters::col::{Column, DataType};
 use otters::prelude::*;
 use rand::random_range;
 
@@ -9,6 +10,66 @@ fn get_random_vec(dim: usize) -> Vec<f32> {
 fn get_random_vectors(num_vecs: usize, dim: usize) -> Vec<Vec<f32>> {
     let vec: Vec<Vec<f32>> = (0..num_vecs).map(|_| get_random_vec(dim)).collect();
     vec
+}
+
+fn demonstrate_column_api() -> Result<(), Box<dyn std::error::Error>> {
+    let _col = Column::new("ages", DataType::Int32)
+        .from(vec![Some(42), None, Some(15)])?
+        .head();
+    println!();
+
+    println!("2. Float values with method chaining:");
+    let _col = Column::new("prices", DataType::Float64)
+        .from(vec![19.99, 29.95, 39.90])?
+        .head();
+    println!();
+
+    let mut str_col = Column::new("names", DataType::String);
+    str_col.push("Alice")?;
+    str_col.push(None::<&str>)?;
+    let _col = str_col.from(vec!["Bob", "Charlie"])?.head();
+    println!();
+
+    // Example 4: DateTime with custom format
+    println!("4. DateTime with custom format:");
+    let _col = Column::new("events", DataType::DateTime)
+        .with_datetime_fmt("%m/%d/%Y")
+        .from(vec![
+            Some("01/15/2024"),
+            Some("02/20/2024"),
+            None,
+            Some("12/25/2023"),
+        ])?
+        .head();
+    println!();
+
+    // Example 5: Show more rows
+    println!("5. Display 10 rows:");
+    let _col = Column::new("numbers", DataType::Int32)
+        .from((1..=12).map(Some).collect::<Vec<_>>())?
+        .head_n(10);
+    println!();
+
+    let col =
+        Column::new("data", DataType::Float64).from(vec![Some(1.1), Some(2.2), Some(3.3), None])?;
+    println!("Column: {}", col.name());
+    let values = col.values();
+    println!("   Data type: {:?}", values.data_type());
+    println!("   Length: {}", values.len());
+    println!("   Null values: {}", col.null_mask());
+
+    // Pattern match to access the actual data vectors
+    match values {
+        otters::col::ColumnValues::Float64(data) => {
+            println!("   Raw vector: {:?}", data);
+        }
+        _ => println!("   Unexpected data type"),
+    }
+
+    let _col = col.head();
+    println!();
+
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,6 +118,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         closest_5[0],
         start_time.elapsed()
     );
+
+    // test Column API
+    demonstrate_column_api()?;
 
     Ok(())
 }
