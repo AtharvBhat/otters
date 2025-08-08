@@ -1,4 +1,3 @@
-use otters::col::{Column, DataType};
 use otters::prelude::*;
 use rand::random_range;
 
@@ -72,6 +71,49 @@ fn demonstrate_column_api() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn demonstrate_expr_api() -> Result<(), Box<dyn std::error::Error>> {
+    use otters::expr::col;
+    use otters::types::DataType;
+    use std::collections::HashMap;
+
+    // Build a simple schema
+    let mut schema: HashMap<String, DataType> = HashMap::new();
+    schema.insert("age".to_string(), DataType::Int64);
+    schema.insert("score".to_string(), DataType::Float64);
+    schema.insert("name".to_string(), DataType::String);
+    schema.insert("ts".to_string(), DataType::DateTime);
+
+    println!("\n=== Expr API demo ===");
+
+    // 1) age > 25 AND score >= 80.0
+    let e1 = col("age").gt(25) & col("score").gte(80.0);
+    let cf1 = e1.compile(&schema)?;
+    println!("Expr1: {:?}\nPlan1: {:?}\n", e1, cf1.clauses);
+
+    // 2) (age > 25 OR age < 18) AND name != "alice"
+    let e3 = (col("age").gt(25) | col("age").lt(18)) & col("name").neq("alice");
+    let cf3 = e3.compile(&schema)?;
+    println!("Expr2: {:?}\nPlan2: {:?}\n", e3, cf3.clauses);
+
+    // 3) OR of multiple string equalities
+    let e4 = col("name").eq("Alice") | col("name").eq("Bob");
+    let cf4 = e4.compile(&schema)?;
+    println!(
+        "Expr3 (name == Alice OR name == Bob): {:?}\nPlan3: {:?}\n",
+        e4, cf4.clauses
+    );
+
+    // 4) DateTime comparisons using datetime strings
+    let e5 = col("ts").gte("2023-01-02T03:04:05Z") & col("ts").lt("2023-12-31 23:59:59");
+    let cf5 = e5.compile(&schema)?;
+    println!(
+        "Expr4 (DateTime strings): {:?}\nPlan4: {:?}\n",
+        e5, cf5.clauses
+    );
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n_size: usize = std::env::args()
         .nth(1)
@@ -100,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect()?;
 
     println!(
-        "Top 5 cosine similarities: {:?} \n elapsed time: {:?}",
+        "Top 5 cosine similarities: {:?} \n elapsed time: {:?}\n",
         top5_similarities[0],
         start_time.elapsed()
     );
@@ -118,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let closest_5 = closest_5_query.with_vector_store(&store).collect()?;
 
     println!(
-        "Top 5 closest vectors (BATCH): {:?} \n elapsed time: {:?}",
+        "Top 5 closest vectors (BATCH): {:?} \n elapsed time: {:?}\n",
         closest_5,
         start_time.elapsed()
     );
@@ -138,13 +180,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect()?;
 
     println!(
-        "Top 5 Farthest vectors: {:?} \n elapsed time: {:?}",
+        "Top 5 Farthest vectors: {:?} \n elapsed time: {:?}\n",
         farthest_5,
         start_time.elapsed()
     );
 
     // test Column API
     demonstrate_column_api()?;
+
+    // demo Expr API
+    demonstrate_expr_api()?;
 
     Ok(())
 }

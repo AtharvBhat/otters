@@ -6,6 +6,16 @@
 
 use wide::*;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DataType {
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    String,
+    DateTime,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct i64x8 {
     low: i64x4,

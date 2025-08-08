@@ -1,4 +1,5 @@
-use otters::col::{Column, ColumnError, DataType};
+use otters::col::{Column, ColumnError};
+use otters::types::DataType;
 
 #[cfg(test)]
 mod column_tests {

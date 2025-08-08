@@ -1,16 +1,7 @@
+use crate::types::DataType;
 use bitvec::prelude::*;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use std::fmt;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DataType {
-    Int32,
-    Int64,
-    Float32,
-    Float64,
-    String,
-    DateTime,
-}
 
 #[derive(Debug)]
 pub enum ColumnData {
@@ -452,7 +443,6 @@ impl Column {
         self
     }
 
-    /// Get raw data arrays for SIMD operations
     pub fn i32_values(&self) -> Option<&[i32]> {
         match &self.data {
             ColumnData::Int32(vec) => Some(vec),
