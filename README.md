@@ -2,43 +2,19 @@
 
 Minimal, exact vector search with metadata filtering. Think "Polars for vector search."
 
-A learning project exploring Rust performance patterns, SIMD, and composable APIs.
+I needed a simple vector search tool for smaller-scale projects, but most vector databases felt like overkill and complex to deploy and maintain for what I actually needed. I also wanted to dive deeper into Rust, so I decided to build exactly the tool I was looking for.
 
-- Brute-force SIMD search (no indexing)
-- Composable query API with filtering and top-k selection
-- Expression compiler for metadata prefiltering (WIP)
+I love Polars and its ergonomic API, so I wanted to adapt a similar approach for vector search—something that feels natural and expressive. Otters is inspired heavily by Polars.
 
-**Exact, minimal, in-memory vector search with metadata filtering capabilities.**
+Good metadata filtering is hard to combine with vector indexing like HNSW. You can either have:
+- A vector index with bad interoperability with metadata filtering, or  
+- Good metadata filtering and column indexing with bad vector search that hurts memory locality
 
-Think "Polars for vector search" — a fast, ergonomic toolkit for vector search and metadata filtering, not a full vector database.
+So I decided not to index at all. Instead, I believe that using clever techniques like zonemaps for metadata filtering and leveraging memory locality with vectorized SIMD instructions should make it possible to achieve very fast vector search and metadata filtering for most use cases.
 
-## 🎯 Project Goals
-- **Exact search**: No indexing or approximate algorithms. SIMD-accelerated exact search only.
-- **Metadata filtering**: Zone-map style prefiltering with a minimal expression compiler.
-- **Ergonomic API**: Clean, composable interface inspired by data processing libraries like Polars.
-- **Minimal footprint**: Small, focused codebase.
+Otters is designed for smaller datasets (~10M vectors) where you want fast, exact vector search with metadata filtering, all running efficiently in memory and no need for the complexity of full vector databases or approximate search indices.
 
-## ✅ What's Implemented
-
-### Vector Search (`VecStore`)
-- **Storage**: Add vectors to an in-memory store with configurable dimensions
-- **Metrics**: Cosine similarity and Euclidean distance with SIMD acceleration  
-- **Filtering**: Threshold-based filtering (`filter(threshold, comparison)`)
-- **Selection**: Top-k selection with various strategies:
-  - `take(k)` - top-k results for single queries
-  - `take_min(k)` / `take_max(k)` - smallest/largest k values
-  - `take_global(k)` - global top-k across batch queries
-- **Batch queries**: `VecQueryPlan` builder for processing multiple query vectors ( Batch querying isnt optimal rn :( )
-
-### Expression System
-- **Typed DSL**: Build expressions with `col("name").gt(value)` syntax
-- **Schema validation**: Type checking against column schemas (Int32/64, Float32/64, String, DateTime)
-- **Compilation**: Expressions compile to `Plan = Vec<Vec<ColumnFilter>>` (AND-of-ORs structure)
-
-### Metadata Column Storage (Demo/Testing)
-- **Typed columns**: Support for integers, floats, strings, and datetime values
-- **Data loading**: `push()` individual values or `from()` bulk data
-- **Display utilities**: `head()` and `head_n()` for inspection
+Otters is meant to be a focused library with an ergonomic, expression based query API that makes vector search feel as natural as working with Polars data frames.
 
 ## Usage
 
@@ -55,27 +31,30 @@ let results = store
     .take(10)
     .collect()?;
 
-// Reusable query plans
-let search_plan = VecQueryPlan::new()
+// You can also prebuild a query plan and use it with a vector store
+let closest_5_query = VecQueryPlan::new()
+    .with_query_vectors(vec![get_random_vec(dim), get_random_vec(dim)])
     .with_metric(Metric::Euclidean)
-    .filter(100.0, Cmp::Lt)
-    .take(5);
+    .filter(400.0, Cmp::Lt)
+    .take_global(5);
 
-// Use with different vectors/stores
-let results1 = search_plan
-    .with_query_vectors(vec![query1, query2])
-    .with_vector_store(&store1)
-    .collect()?;
+let closest_5 = closest_5_query.with_vector_store(&store).collect()?;
 
-let results2 = search_plan
-    .with_query_vectors(user_query)
-    .with_vector_store(&store2)  
+// You can also prebuild a query plan without query vectors
+// and provide them later when available
+let farthest_5_query = VecQueryPlan::new()
+    .with_vector_store(&store)
+    .with_metric(Metric::Cosine)
+    .take_min(5);
+
+// Add query vectors and execute when ready
+let farthest_5 = farthest_5_query
+    .with_query_vectors(get_random_vec(dim))
     .collect()?;
 ```
 
 ## What's Next
 - Metadata filtering integration with vector search
-- Zone maps for fast prefiltering  
 - Python bindings (PyO3)
 
 ## Examples
