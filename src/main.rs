@@ -12,13 +12,13 @@ fn get_random_vectors(num_vecs: usize, dim: usize) -> Vec<Vec<f32>> {
 }
 
 fn demonstrate_column_api() -> Result<(), Box<dyn std::error::Error>> {
-    let _col = Column::new("ages", DataType::Int32)
+    Column::new("ages", DataType::Int32)
         .from(vec![Some(42), None, Some(15)])?
         .head();
     println!();
 
     println!("2. Float values with method chaining:");
-    let _col = Column::new("prices", DataType::Float64)
+    Column::new("prices", DataType::Float64)
         .from(vec![19.99, 29.95, 39.90])?
         .head();
     println!();
@@ -26,12 +26,12 @@ fn demonstrate_column_api() -> Result<(), Box<dyn std::error::Error>> {
     let mut str_col = Column::new("names", DataType::String);
     str_col.push("Alice")?;
     str_col.push(None::<&str>)?;
-    let _col = str_col.from(vec!["Bob", "Charlie"])?.head();
+    str_col.from(vec!["Bob", "Charlie"])?.head();
     println!();
 
     // Example 4: DateTime with custom format
     println!("4. DateTime with custom format:");
-    let _col = Column::new("events", DataType::DateTime)
+    Column::new("events", DataType::DateTime)
         .with_datetime_fmt("%m/%d/%Y")
         .from(vec![
             Some("01/15/2024"),
@@ -44,7 +44,7 @@ fn demonstrate_column_api() -> Result<(), Box<dyn std::error::Error>> {
 
     // Example 5: Show more rows
     println!("5. Display 10 rows:");
-    let _col = Column::new("numbers", DataType::Int32)
+    Column::new("numbers", DataType::Int32)
         .from((1..=12).map(Some).collect::<Vec<_>>())?
         .head_n(10);
     println!();
@@ -60,12 +60,12 @@ fn demonstrate_column_api() -> Result<(), Box<dyn std::error::Error>> {
     // Pattern match to access the actual data vectors
     match values {
         otters::col::ColumnValues::Float64(data) => {
-            println!("   Raw vector: {:?}", data);
+            println!("   Raw vector: {data:?}");
         }
         _ => println!("   Unexpected data type"),
     }
 
-    let _col = col.head();
+    col.head();
     println!();
 
     Ok(())
@@ -214,7 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .collect();
-    let name_vals: Vec<Option<String>> = (0..n_size).map(|i| Some(format!("user_{}", i))).collect();
+    let name_vals: Vec<Option<String>> = (0..n_size).map(|i| Some(format!("user_{i}"))).collect();
 
     let columns = vec![
         (
@@ -247,7 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Meta query top 5: {:?} \n elapsed time: {:?}",
-        meta_results.get(0).unwrap_or(&Vec::new()),
+        meta_results.first().unwrap_or(&Vec::new()),
         start_time.elapsed()
     );
 
@@ -278,7 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect();
         let name_vals: Vec<Option<String>> =
-            (0..n_size).map(|i| Some(format!("user_{}", i))).collect();
+            (0..n_size).map(|i| Some(format!("user_{i}"))).collect();
 
         let columns = vec![
             (
@@ -320,7 +320,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .query(test_vec.clone(), Metric::Cosine)
             .meta_filter(col("age").gt(10).and(col("grade").eq("A")))?
             .vec_filter(0.1, Cmp::Gt)
-            .with_parallel()
             .with_stats()
             .take(5)
             .collect()?;
@@ -334,7 +333,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .query(test_vec.clone(), Metric::Cosine)
         .meta_filter(col("age").gt(10) & col("grade").eq("A"))?
         .vec_filter(0.1, Cmp::Gt)
-        .with_parallel()
         .with_stats()
         .take(5)
         .collect()?;

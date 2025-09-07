@@ -77,6 +77,37 @@ pub fn calculate_scores_chunk(
         .collect()
 }
 
+// Calculate scores for all queries for a chunk of 8 vectors in a flat (row-major) buffer
+#[inline(always)]
+pub fn calculate_scores_chunk_flat(
+    queries: &[Vec<f32>],
+    query_inv_norms: &[f32],
+    flat_vectors: &[f32],
+    dim: usize,
+    base_row: usize,
+    inv_norms: &[f32],
+    metric: &Metric,
+) -> Vec<f32x8> {
+    queries
+        .iter()
+        .zip(query_inv_norms.iter())
+        .map(|(query, &query_inv_norm)| {
+            let mut scores = [0.0f32; 8];
+            for i in 0..8 {
+                let row = base_row + i;
+                let start = row * dim;
+                let v = &flat_vectors[start..start + dim];
+                scores[i] = match metric {
+                    Metric::Cosine => cosine_similarity(query, v, query_inv_norm, inv_norms[i]),
+                    Metric::Euclidean => euclidean_distance_squared(query, v),
+                    Metric::DotProduct => dot_product(query, v),
+                };
+            }
+            f32x8::from(&scores[..])
+        })
+        .collect()
+}
+
 fn filter_simd(scores: f32x8, threshold: f32, cmp: &Cmp) -> f32x8 {
     let threshold_simd = f32x8::splat(threshold);
     match cmp {
@@ -128,7 +159,7 @@ impl<'a> TopKCollector<'a> {
         };
 
         Self {
-            buffer: Vec::with_capacity(k.min(1024)),
+            buffer: Vec::with_capacity(k),
             k,
             take_type,
             filter,
@@ -201,7 +232,12 @@ impl<'a> TopKCollector<'a> {
     }
 
     // Like push_chunk, but also applies an optional row mask for the 8-lane block
-    pub fn push_chunk_masked(&mut self, chunk_idx: usize, scores: f32x8, rowmask: Option<[bool; 8]>) {
+    pub fn push_chunk_masked(
+        &mut self,
+        chunk_idx: usize,
+        scores: f32x8,
+        rowmask: Option<[bool; 8]>,
+    ) {
         if self.k == 0 {
             return;
         }
@@ -249,6 +285,9 @@ impl<'a> TopKCollector<'a> {
     }
 
     fn push_single(&mut self, idx: usize, score: f32) {
+        if score.is_nan() {
+            return;
+        }
         match self.buffer.len() == self.k {
             true => {
                 // Buffer full - check if we should insert
@@ -282,8 +321,8 @@ impl<'a> TopKCollector<'a> {
     fn find_insert_position(&self, score: f32) -> usize {
         self.buffer
             .binary_search_by(|probe| match &self.take_type {
-                TakeType::Min => probe.1.partial_cmp(&score).unwrap(),
-                TakeType::Max => score.partial_cmp(&probe.1).unwrap(),
+                TakeType::Min => probe.1.total_cmp(&score),
+                TakeType::Max => score.total_cmp(&probe.1),
             })
             .unwrap_or_else(|e| e)
     }
@@ -291,12 +330,8 @@ impl<'a> TopKCollector<'a> {
     fn sort(&mut self) {
         if !self.is_sorted {
             let cmp_fn = match &self.take_type {
-                TakeType::Min => {
-                    |a: &(usize, f32), b: &(usize, f32)| a.1.partial_cmp(&b.1).unwrap()
-                }
-                TakeType::Max => {
-                    |a: &(usize, f32), b: &(usize, f32)| b.1.partial_cmp(&a.1).unwrap()
-                }
+                TakeType::Min => |a: &(usize, f32), b: &(usize, f32)| a.1.total_cmp(&b.1),
+                TakeType::Max => |a: &(usize, f32), b: &(usize, f32)| b.1.total_cmp(&a.1),
             };
             self.buffer.sort_unstable_by(cmp_fn);
             self.is_sorted = true;

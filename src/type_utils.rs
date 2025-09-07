@@ -195,15 +195,15 @@ impl u64x8 {
 
     #[inline]
     pub fn cmp_eq(self, other: Self) -> u8 {
-        // Compare as i64 by transmute
-        use std::mem;
+        // Compare as i64 by transmute with explicit types
+        use std::mem::transmute;
         let self_i64 = i64x8 {
-            low: unsafe { mem::transmute(self.low) },
-            high: unsafe { mem::transmute(self.high) },
+            low: unsafe { transmute::<u64x4, i64x4>(self.low) },
+            high: unsafe { transmute::<u64x4, i64x4>(self.high) },
         };
         let other_i64 = i64x8 {
-            low: unsafe { mem::transmute(other.low) },
-            high: unsafe { mem::transmute(other.high) },
+            low: unsafe { transmute::<u64x4, i64x4>(other.low) },
+            high: unsafe { transmute::<u64x4, i64x4>(other.high) },
         };
         self_i64.cmp_eq(other_i64)
     }
@@ -211,10 +211,10 @@ impl u64x8 {
     #[inline]
     pub fn cmp_gt(self, other: Self) -> u8 {
         let mut result = 0u8;
-        let self_low: [u64; 4] = unsafe { std::mem::transmute(self.low) };
-        let other_low: [u64; 4] = unsafe { std::mem::transmute(other.low) };
-        let self_high: [u64; 4] = unsafe { std::mem::transmute(self.high) };
-        let other_high: [u64; 4] = unsafe { std::mem::transmute(other.high) };
+        let self_low: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(self.low) };
+        let other_low: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(other.low) };
+        let self_high: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(self.high) };
+        let other_high: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(other.high) };
         for i in 0..4 {
             if self_low[i] > other_low[i] {
                 result |= 1 << i;
@@ -236,10 +236,10 @@ impl u64x8 {
     #[inline]
     pub fn cmp_lt(self, other: Self) -> u8 {
         let mut result = 0u8;
-        let self_low: [u64; 4] = unsafe { std::mem::transmute(self.low) };
-        let other_low: [u64; 4] = unsafe { std::mem::transmute(other.low) };
-        let self_high: [u64; 4] = unsafe { std::mem::transmute(self.high) };
-        let other_high: [u64; 4] = unsafe { std::mem::transmute(other.high) };
+        let self_low: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(self.low) };
+        let other_low: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(other.low) };
+        let self_high: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(self.high) };
+        let other_high: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(other.high) };
         for i in 0..4 {
             if self_low[i] < other_low[i] {
                 result |= 1 << i;
@@ -260,10 +260,10 @@ impl u64x8 {
 
     #[inline]
     pub fn min(self, other: Self) -> Self {
-        let self_low: [u64; 4] = unsafe { std::mem::transmute(self.low) };
-        let other_low: [u64; 4] = unsafe { std::mem::transmute(other.low) };
-        let self_high: [u64; 4] = unsafe { std::mem::transmute(self.high) };
-        let other_high: [u64; 4] = unsafe { std::mem::transmute(other.high) };
+        let self_low: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(self.low) };
+        let other_low: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(other.low) };
+        let self_high: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(self.high) };
+        let other_high: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(other.high) };
         let mut result_low = [0u64; 4];
         let mut result_high = [0u64; 4];
         for i in 0..4 {
@@ -273,17 +273,17 @@ impl u64x8 {
             result_high[i] = self_high[i].min(other_high[i]);
         }
         Self {
-            low: unsafe { std::mem::transmute(result_low) },
-            high: unsafe { std::mem::transmute(result_high) },
+            low: unsafe { std::mem::transmute::<[u64; 4], u64x4>(result_low) },
+            high: unsafe { std::mem::transmute::<[u64; 4], u64x4>(result_high) },
         }
     }
 
     #[inline]
     pub fn max(self, other: Self) -> Self {
-        let self_low: [u64; 4] = unsafe { std::mem::transmute(self.low) };
-        let other_low: [u64; 4] = unsafe { std::mem::transmute(other.low) };
-        let self_high: [u64; 4] = unsafe { std::mem::transmute(self.high) };
-        let other_high: [u64; 4] = unsafe { std::mem::transmute(other.high) };
+        let self_low: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(self.low) };
+        let other_low: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(other.low) };
+        let self_high: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(self.high) };
+        let other_high: [u64; 4] = unsafe { std::mem::transmute::<u64x4, [u64; 4]>(other.high) };
         let mut result_low = [0u64; 4];
         let mut result_high = [0u64; 4];
         for i in 0..4 {
@@ -293,8 +293,8 @@ impl u64x8 {
             result_high[i] = self_high[i].max(other_high[i]);
         }
         Self {
-            low: unsafe { std::mem::transmute(result_low) },
-            high: unsafe { std::mem::transmute(result_high) },
+            low: unsafe { std::mem::transmute::<[u64; 4], u64x4>(result_low) },
+            high: unsafe { std::mem::transmute::<[u64; 4], u64x4>(result_high) },
         }
     }
 }
@@ -324,8 +324,8 @@ pub fn mask8_rows_f32(
     };
     let arr = m.to_array();
     let mut bits: u8 = 0;
-    for j in 0..8 {
-        let ok = arr[j] != 0.0;
+    for (j, &val) in arr.iter().enumerate() {
+        let ok = val != 0.0;
         let not_null = !nulls.get(start + j).map(|b| *b).unwrap_or(false);
         if ok && not_null {
             bits |= 1 << j;
@@ -376,8 +376,8 @@ pub fn mask8_rows_i32(
         }
     };
     let mut bits: u8 = 0;
-    for j in 0..8 {
-        let ok = arr[j] != 0;
+    for (j, &val) in arr.iter().enumerate() {
+        let ok = val != 0;
         let not_null = !nulls.get(start + j).map(|b| *b).unwrap_or(false);
         if ok && not_null {
             bits |= 1 << j;
@@ -398,14 +398,14 @@ pub fn mask8_rows_f64(
     let start = base + off;
     let v = f64x8::from_slice(&vals[start..start + 8]);
     let t = f64x8::splat(thr);
-    let mut bits = match cmp {
+    let bits = match cmp {
         crate::expr::CmpOp::Eq => v.cmp_eq(t),
         crate::expr::CmpOp::Neq => !v.cmp_eq(t),
         crate::expr::CmpOp::Lt => v.cmp_lt(t),
         crate::expr::CmpOp::Lte => v.cmp_le(t),
         crate::expr::CmpOp::Gt => v.cmp_gt(t),
         crate::expr::CmpOp::Gte => v.cmp_ge(t),
-    } & 0xFF;
+    };
     let mut nn: u8 = 0;
     for j in 0..8 {
         if !nulls.get(start + j).map(|b| *b).unwrap_or(false) {
@@ -427,14 +427,14 @@ pub fn mask8_rows_i64(
     let start = base + off;
     let v = i64x8::from_slice(&vals[start..start + 8]);
     let t = i64x8::splat(thr);
-    let mut bits = match cmp {
+    let bits = match cmp {
         crate::expr::CmpOp::Eq => v.cmp_eq(t),
         crate::expr::CmpOp::Neq => !v.cmp_eq(t),
         crate::expr::CmpOp::Lt => v.cmp_lt(t),
         crate::expr::CmpOp::Lte => v.cmp_lte(t),
         crate::expr::CmpOp::Gt => v.cmp_gt(t),
         crate::expr::CmpOp::Gte => v.cmp_gte(t),
-    } & 0xFF;
+    };
     let mut nn: u8 = 0;
     for j in 0..8 {
         if !nulls.get(start + j).map(|b| *b).unwrap_or(false) {
@@ -485,14 +485,14 @@ pub fn mask8_ranges_f64(
     let minv = f64x8::from_slice(&min[off..off + 8]);
     let maxv = f64x8::from_slice(&max[off..off + 8]);
     let t = f64x8::splat(thr);
-    let mut bits = match cmp {
+    let bits = match cmp {
         crate::expr::CmpOp::Eq => minv.cmp_le(t) & maxv.cmp_ge(t),
         crate::expr::CmpOp::Lt => minv.cmp_lt(t),
         crate::expr::CmpOp::Lte => minv.cmp_le(t),
         crate::expr::CmpOp::Gt => maxv.cmp_gt(t),
         crate::expr::CmpOp::Gte => maxv.cmp_ge(t),
         crate::expr::CmpOp::Neq => 0xFF,
-    } & 0xFF;
+    };
     let mut nn: u8 = 0;
     for j in 0..8 {
         if non_null[off + j] > 0 {
@@ -567,14 +567,14 @@ pub fn mask8_ranges_i64(
     let minv = i64x8::from_slice(&min[off..off + 8]);
     let maxv = i64x8::from_slice(&max[off..off + 8]);
     let t = i64x8::splat(thr);
-    let mut bits = match cmp {
+    let bits = match cmp {
         crate::expr::CmpOp::Eq => minv.cmp_lte(t) & maxv.cmp_gte(t),
         crate::expr::CmpOp::Lt => minv.cmp_lt(t),
         crate::expr::CmpOp::Lte => minv.cmp_lte(t),
         crate::expr::CmpOp::Gt => maxv.cmp_gt(t),
         crate::expr::CmpOp::Gte => maxv.cmp_gte(t),
         crate::expr::CmpOp::Neq => 0xFF,
-    } & 0xFF;
+    };
     let mut nn: u8 = 0;
     for j in 0..8 {
         if non_null[off + j] > 0 {
@@ -878,6 +878,157 @@ pub fn apply_chunk_mask_ranges_i64(
             crate::expr::CmpOp::Neq => true,
         } && non_null[i] > 0;
         out[i] |= sat;
+        i += 1;
+    }
+}
+#[inline]
+pub fn apply_chunk_mask_ranges_f32_bits(
+    min: &[f32],
+    max: &[f32],
+    non_null: &[usize],
+    n_chunks: usize,
+    cmp: crate::expr::CmpOp,
+    thr: f32,
+    out: &mut BitVec,
+) {
+    let mut i = 0;
+    while i + 8 <= n_chunks {
+        let bits = mask8_ranges_f32(min, max, non_null, i, cmp, thr);
+        for j in 0..8 {
+            if (bits >> j) & 1 == 1 {
+                out.set(i + j, true);
+            }
+        }
+        i += 8;
+    }
+    while i < n_chunks {
+        let mn = min[i];
+        let mx = max[i];
+        let sat = match cmp {
+            crate::expr::CmpOp::Eq => mn <= thr && thr <= mx,
+            crate::expr::CmpOp::Lt => mn < thr,
+            crate::expr::CmpOp::Lte => mn <= thr,
+            crate::expr::CmpOp::Gt => mx > thr,
+            crate::expr::CmpOp::Gte => mx >= thr,
+            crate::expr::CmpOp::Neq => true,
+        } && non_null[i] > 0;
+        if sat {
+            out.set(i, true);
+        }
+        i += 1;
+    }
+}
+
+#[inline]
+pub fn apply_chunk_mask_ranges_f64_bits(
+    min: &[f64],
+    max: &[f64],
+    non_null: &[usize],
+    n_chunks: usize,
+    cmp: crate::expr::CmpOp,
+    thr: f64,
+    out: &mut BitVec,
+) {
+    let mut i = 0;
+    while i + 8 <= n_chunks {
+        let bits = mask8_ranges_f64(min, max, non_null, i, cmp, thr);
+        for j in 0..8 {
+            if (bits >> j) & 1 == 1 {
+                out.set(i + j, true);
+            }
+        }
+        i += 8;
+    }
+    while i < n_chunks {
+        let mn = min[i];
+        let mx = max[i];
+        let sat = match cmp {
+            crate::expr::CmpOp::Eq => mn <= thr && thr <= mx,
+            crate::expr::CmpOp::Lt => mn < thr,
+            crate::expr::CmpOp::Lte => mn <= thr,
+            crate::expr::CmpOp::Gt => mx > thr,
+            crate::expr::CmpOp::Gte => mx >= thr,
+            crate::expr::CmpOp::Neq => true,
+        } && non_null[i] > 0;
+        if sat {
+            out.set(i, true);
+        }
+        i += 1;
+    }
+}
+
+#[inline]
+pub fn apply_chunk_mask_ranges_i32_bits(
+    min: &[i32],
+    max: &[i32],
+    non_null: &[usize],
+    n_chunks: usize,
+    cmp: crate::expr::CmpOp,
+    thr: i32,
+    out: &mut BitVec,
+) {
+    let mut i = 0;
+    while i + 8 <= n_chunks {
+        let bits = mask8_ranges_i32(min, max, non_null, i, cmp, thr);
+        for j in 0..8 {
+            if (bits >> j) & 1 == 1 {
+                out.set(i + j, true);
+            }
+        }
+        i += 8;
+    }
+    while i < n_chunks {
+        let mn = min[i];
+        let mx = max[i];
+        let sat = match cmp {
+            crate::expr::CmpOp::Eq => mn <= thr && thr <= mx,
+            crate::expr::CmpOp::Lt => mn < thr,
+            crate::expr::CmpOp::Lte => mn <= thr,
+            crate::expr::CmpOp::Gt => mx > thr,
+            crate::expr::CmpOp::Gte => mx >= thr,
+            crate::expr::CmpOp::Neq => true,
+        } && non_null[i] > 0;
+        if sat {
+            out.set(i, true);
+        }
+        i += 1;
+    }
+}
+
+#[inline]
+pub fn apply_chunk_mask_ranges_i64_bits(
+    min: &[i64],
+    max: &[i64],
+    non_null: &[usize],
+    n_chunks: usize,
+    cmp: crate::expr::CmpOp,
+    thr: i64,
+    out: &mut BitVec,
+) {
+    let mut i = 0;
+    while i + 8 <= n_chunks {
+        let bits = mask8_ranges_i64(min, max, non_null, i, cmp, thr);
+        for j in 0..8 {
+            if (bits >> j) & 1 == 1 {
+                out.set(i + j, true);
+            }
+        }
+        i += 8;
+    }
+    while i < n_chunks {
+        let mn = min[i];
+        let mx = max[i];
+        let sat = match cmp {
+            crate::expr::CmpOp::Eq => mn <= thr && thr <= mx,
+            crate::expr::CmpOp::Lt => mn < thr,
+            crate::expr::CmpOp::Lte => mn <= thr,
+            crate::expr::CmpOp::Gt => mx > thr,
+            crate::expr::CmpOp::Gte => mx >= thr,
+            crate::expr::CmpOp::Neq => true,
+        } && non_null[i] > 0;
+        if sat {
+            out.set(i, true);
+        }
         i += 1;
     }
 }

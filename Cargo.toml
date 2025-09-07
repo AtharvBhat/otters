@@ -11,6 +11,11 @@ rand = "0.9.1"
 rayon = "1.11.0"
 wide = "0.7.33"
 
+[features]
+# Toggle SIMD-accelerated zonemap min/max accumulation during ingest.
+# Off by default to keep code simple unless needed.
+simd_zonemap = []
+
 [profile.perf]
 inherits = "release"
 opt-level = 3

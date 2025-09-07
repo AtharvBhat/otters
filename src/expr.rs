@@ -192,8 +192,7 @@ impl fmt::Display for ExprError {
             ExprError::TypeMismatch(c, dt, got) => {
                 write!(
                     f,
-                    "Type mismatch for column '{c}': expected {:?}, got literal {got}",
-                    dt
+                    "Type mismatch for column '{c}': expected {dt:?}, got literal {got}"
                 )
             }
             ExprError::UnsupportedStringOp(c) => {

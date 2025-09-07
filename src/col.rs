@@ -85,9 +85,9 @@ impl fmt::Display for ColumnError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ColumnError::TypeMismatch { expected, got } => {
-                write!(f, "Type mismatch: expected {:?}, got {}", expected, got)
+                write!(f, "Type mismatch: expected {expected:?}, got {got}")
             }
-            ColumnError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            ColumnError::ParseError(msg) => write!(f, "Parse error: {msg}"),
         }
     }
 }
@@ -179,7 +179,7 @@ impl From<&String> for ColumnValue {
 
 impl From<Option<&String>> for ColumnValue {
     fn from(value: Option<&String>) -> Self {
-        ColumnValue::String(value.map(|s| s.clone()))
+        ColumnValue::String(value.cloned())
     }
 }
 
@@ -409,10 +409,10 @@ impl Column {
         let limit = self.len().min(n);
 
         for i in 0..limit {
-            let is_null = self.null_mask.get(i).map_or(false, |bit| *bit);
+            let is_null = self.null_mask.get(i).is_some_and(|bit| *bit);
 
             if is_null {
-                println!("  [{}]: NULL", i);
+                println!("  [{i}]: NULL");
             } else {
                 match &self.data {
                     ColumnData::Int32(vec) => println!("  [{}]: {}", i, vec[i]),
@@ -504,38 +504,38 @@ impl Column {
         match (&mut self.data, values) {
             (ColumnData::Int32(dest), ColumnValues::Int32(src)) => {
                 dest.extend(src.iter().cloned());
-                self.null_mask
-                    .extend(std::iter::repeat(false).take(src.len()));
+                let add = src.len();
+                self.null_mask.resize(self.null_mask.len() + add, false);
                 Ok(())
             }
             (ColumnData::Int64(dest), ColumnValues::Int64(src)) => {
                 dest.extend(src.iter().cloned());
-                self.null_mask
-                    .extend(std::iter::repeat(false).take(src.len()));
+                let add = src.len();
+                self.null_mask.resize(self.null_mask.len() + add, false);
                 Ok(())
             }
             (ColumnData::Float32(dest), ColumnValues::Float32(src)) => {
                 dest.extend(src.iter().cloned());
-                self.null_mask
-                    .extend(std::iter::repeat(false).take(src.len()));
+                let add = src.len();
+                self.null_mask.resize(self.null_mask.len() + add, false);
                 Ok(())
             }
             (ColumnData::Float64(dest), ColumnValues::Float64(src)) => {
                 dest.extend(src.iter().cloned());
-                self.null_mask
-                    .extend(std::iter::repeat(false).take(src.len()));
+                let add = src.len();
+                self.null_mask.resize(self.null_mask.len() + add, false);
                 Ok(())
             }
             (ColumnData::String(dest), ColumnValues::String(src)) => {
                 dest.extend(src.iter().cloned());
-                self.null_mask
-                    .extend(std::iter::repeat(false).take(src.len()));
+                let add = src.len();
+                self.null_mask.resize(self.null_mask.len() + add, false);
                 Ok(())
             }
             (ColumnData::DateTime(dest), ColumnValues::DateTime(src)) => {
                 dest.extend(src.iter().cloned());
-                self.null_mask
-                    .extend(std::iter::repeat(false).take(src.len()));
+                let add = src.len();
+                self.null_mask.resize(self.null_mask.len() + add, false);
                 Ok(())
             }
             // Type mismatch
@@ -567,8 +567,7 @@ fn parse_datetime(s: &str) -> Result<i64, ColumnError> {
     }
 
     Err(ColumnError::ParseError(format!(
-        "Cannot parse '{}' as datetime. Supported formats: ISO 8601, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS",
-        s
+        "Cannot parse '{s}' as datetime. Supported formats: ISO 8601, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS"
     )))
 }
 
@@ -586,7 +585,6 @@ fn parse_datetime_fmt(s: &str, format: &str) -> Result<i64, ColumnError> {
     }
 
     Err(ColumnError::ParseError(format!(
-        "Cannot parse '{}' with format '{}'",
-        s, format
+        "Cannot parse '{s}' with format '{format}'"
     )))
 }

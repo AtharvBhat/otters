@@ -6,9 +6,8 @@ use crate::{
     expr::{CmpOp, ColumnFilter, CompiledFilter, Expr, NumericLiteral},
     meta_compute::{ZoneStat, build_zone_stat_for_range},
     type_utils::{
-        DataType, apply_chunk_mask_ranges_f32, apply_chunk_mask_ranges_f64,
-        apply_chunk_mask_ranges_i32, apply_chunk_mask_ranges_i64, apply_rows_mask_f32,
-        apply_rows_mask_f64, apply_rows_mask_i32, apply_rows_mask_i64,
+        DataType, apply_rows_mask_f32, apply_rows_mask_f64, apply_rows_mask_i32,
+        apply_rows_mask_i64,
     },
     vec::{Cmp as VecCmp, Metric, TakeScope, TakeType, VecStore},
 };
@@ -96,7 +95,7 @@ impl MetaStoreBuilder {
         let expected = *self
             .schema
             .get(name)
-            .ok_or_else(|| format!("unknown column '{}' not present in schema", name))?;
+            .ok_or_else(|| format!("unknown column '{name}' not present in schema"))?;
         if expected != column.dtype() {
             return Err(format!(
                 "dtype mismatch for column '{}': schema {:?}, got {:?}",
@@ -115,7 +114,7 @@ impl MetaStoreBuilder {
             let expected = *self
                 .schema
                 .get(&name)
-                .ok_or_else(|| format!("unknown column '{}' not present in schema", name))?;
+                .ok_or_else(|| format!("unknown column '{name}' not present in schema"))?;
             if expected != col.dtype() {
                 return Err(format!(
                     "dtype mismatch for column '{}': schema {:?}, got {:?}",
@@ -138,11 +137,11 @@ impl MetaStoreBuilder {
         let n_rows = vectors.len();
 
         // Enforce: every column in schema must be present and have the same length as vectors
-        for (name, _dtype) in &self.schema {
+        for name in self.schema.keys() {
             let col = self
                 .columns
                 .get(name)
-                .ok_or_else(|| format!("missing column '{}' in builder columns", name))?;
+                .ok_or_else(|| format!("missing column '{name}' in builder columns"))?;
             if col.len() != n_rows {
                 return Err(format!(
                     "column '{}' length {} does not match vectors length {}",
@@ -212,7 +211,7 @@ impl MetaStoreBuilder {
                 let col = self
                     .columns
                     .get(name)
-                    .ok_or_else(|| format!("missing column '{}' in builder columns", name))?;
+                    .ok_or_else(|| format!("missing column '{name}' in builder columns"))?;
                 let stat = build_zone_stat_for_range(col, *dtype, base_offset, end)?;
                 stats.insert(name.clone(), stat);
             }
@@ -223,42 +222,32 @@ impl MetaStoreBuilder {
                 match (dtype, stats.get(name).unwrap()) {
                     (DataType::Float32, ZoneStat::Float { min, max, non_null }) => {
                         // Use only f32 packed ranges for f32 columns
-                        let e32 = packed_ranges_f32
-                            .entry(name.clone())
-                            .or_insert_with(PackedRangesF32::default);
+                        let e32 = packed_ranges_f32.entry(name.clone()).or_default();
                         e32.min.push(*min as f32);
                         e32.max.push(*max as f32);
                         e32.non_null.push(*non_null);
                     }
                     (DataType::Float64, ZoneStat::Float { min, max, non_null }) => {
-                        let entry = packed_ranges_f64
-                            .entry(name.clone())
-                            .or_insert_with(PackedRangesF64::default);
+                        let entry = packed_ranges_f64.entry(name.clone()).or_default();
                         entry.min.push(*min);
                         entry.max.push(*max);
                         entry.non_null.push(*non_null);
                     }
                     (DataType::Int32, ZoneStat::Int { min, max, non_null }) => {
                         // Use only i32 packed ranges for i32 columns
-                        let e32 = packed_ranges_i32
-                            .entry(name.clone())
-                            .or_insert_with(PackedRangesI32::default);
+                        let e32 = packed_ranges_i32.entry(name.clone()).or_default();
                         e32.min.push(*min as i32);
                         e32.max.push(*max as i32);
                         e32.non_null.push(*non_null);
                     }
                     (DataType::Int64, ZoneStat::Int { min, max, non_null }) => {
-                        let entry = packed_ranges_i64
-                            .entry(name.clone())
-                            .or_insert_with(PackedRangesI64::default);
+                        let entry = packed_ranges_i64.entry(name.clone()).or_default();
                         entry.min.push(*min);
                         entry.max.push(*max);
                         entry.non_null.push(*non_null);
                     }
                     (DataType::DateTime, ZoneStat::DateTime { min, max, non_null }) => {
-                        let entry = packed_ranges_i64
-                            .entry(name.clone())
-                            .or_insert_with(PackedRangesI64::default);
+                        let entry = packed_ranges_i64.entry(name.clone()).or_default();
                         entry.min.push(*min);
                         entry.max.push(*max);
                         entry.non_null.push(*non_null);
@@ -352,8 +341,8 @@ impl MetaStore {
         }
     }
 
-    /// Start a builder by schema; you should supply filled columns via `with_columns`-like manual flow.
-    pub fn builder_from_schema(schema: &[(String, DataType)]) -> MetaStoreBuilder {
+    /// Start a builder by schema; you should supply filled columns via `with_columns`.
+    pub fn from_schema(schema: &[(String, DataType)]) -> MetaStoreBuilder {
         let mut schema_map = HashMap::new();
         let mut columns = HashMap::new();
         for (name, dt) in schema {
@@ -372,9 +361,9 @@ impl MetaStore {
         println!("MetaStore:");
         println!("Schema:");
         for (name, dtype) in &self.schema {
-            println!(" - {}: {:?}", name, dtype);
+            println!(" - {name}: {dtype:?}");
         }
-        for (_, col) in &self.columns {
+        for col in self.columns.values() {
             col.head();
         }
         println!(
@@ -390,40 +379,33 @@ impl MetaStore {
 
     // Build a per-chunk mask for the compiled plan using packed ranges and SIMD, mirroring
     // the pruning logic used during query planning. True indicates the chunk may satisfy the plan.
-    fn build_chunk_mask_for_plan(&self, compiled: &CompiledFilter) -> Vec<bool> {
+    fn build_chunk_mask_for_plan(&self, compiled: &CompiledFilter) -> BitVec {
         let n_chunks = self.chunks.len();
         if n_chunks == 0 {
-            return Vec::new();
+            return BitVec::new();
         }
-        let mut clause_masks: Vec<Vec<bool>> = Vec::new();
-        for clause in &compiled.clauses {
-            let mut mask = vec![false; n_chunks];
-            for leaf in clause {
-                match leaf {
+        compiled
+            .clauses
+            .iter()
+            .fold(bitvec![1; n_chunks], |mut acc, clause| {
+                let mut clause_mask = bitvec![0; n_chunks];
+                clause.iter().for_each(|leaf| match leaf {
                     ColumnFilter::Numeric { column, cmp, rhs } => {
-                        self.apply_numeric_leaf_chunk_mask(&mut mask, column, *cmp, rhs);
+                        self.apply_numeric_leaf_chunk_mask(&mut clause_mask, column, *cmp, rhs);
                     }
                     ColumnFilter::String { column, cmp, rhs } => {
-                        self.apply_string_leaf_chunk_mask(&mut mask, column, *cmp, rhs);
+                        self.apply_string_leaf_chunk_mask(&mut clause_mask, column, *cmp, rhs);
                     }
-                }
-            }
-            clause_masks.push(mask);
-        }
-        // AND across clauses
-        let mut final_mask = vec![true; n_chunks];
-        for cm in &clause_masks {
-            for i in 0..n_chunks {
-                final_mask[i] &= cm[i];
-            }
-        }
-        final_mask
+                });
+                acc &= &clause_mask;
+                acc
+            })
     }
 
     // Leaf helpers for chunk preselection
     fn apply_numeric_leaf_chunk_mask(
         &self,
-        mask: &mut [bool],
+        mask: &mut BitVec,
         column: &str,
         cmp: CmpOp,
         rhs: &NumericLiteral,
@@ -433,7 +415,7 @@ impl MetaStore {
             NumericLiteral::F64(rv) => match self.schema.get(column) {
                 Some(DataType::Float32) => {
                     if let Some(packed) = self.packed_ranges_f32.get(column) {
-                        apply_chunk_mask_ranges_f32(
+                        crate::type_utils::apply_chunk_mask_ranges_f32_bits(
                             &packed.min,
                             &packed.max,
                             &packed.non_null,
@@ -446,7 +428,7 @@ impl MetaStore {
                 }
                 Some(DataType::Float64) => {
                     if let Some(packed) = self.packed_ranges_f64.get(column) {
-                        apply_chunk_mask_ranges_f64(
+                        crate::type_utils::apply_chunk_mask_ranges_f64_bits(
                             &packed.min,
                             &packed.max,
                             &packed.non_null,
@@ -459,7 +441,7 @@ impl MetaStore {
                 }
                 _ => {
                     if let Some(packed) = self.packed_ranges_i64.get(column) {
-                        apply_chunk_mask_ranges_i64(
+                        crate::type_utils::apply_chunk_mask_ranges_i64_bits(
                             &packed.min,
                             &packed.max,
                             &packed.non_null,
@@ -474,7 +456,7 @@ impl MetaStore {
             NumericLiteral::I64(rv) => match self.schema.get(column) {
                 Some(DataType::Int32) => {
                     if let Some(packed) = self.packed_ranges_i32.get(column) {
-                        apply_chunk_mask_ranges_i32(
+                        crate::type_utils::apply_chunk_mask_ranges_i32_bits(
                             &packed.min,
                             &packed.max,
                             &packed.non_null,
@@ -487,7 +469,7 @@ impl MetaStore {
                 }
                 Some(DataType::Int64) | Some(DataType::DateTime) => {
                     if let Some(packed) = self.packed_ranges_i64.get(column) {
-                        apply_chunk_mask_ranges_i64(
+                        crate::type_utils::apply_chunk_mask_ranges_i64_bits(
                             &packed.min,
                             &packed.max,
                             &packed.non_null,
@@ -497,7 +479,7 @@ impl MetaStore {
                             mask,
                         );
                     } else if let Some(packed) = self.packed_ranges_f64.get(column) {
-                        apply_chunk_mask_ranges_f64(
+                        crate::type_utils::apply_chunk_mask_ranges_f64_bits(
                             &packed.min,
                             &packed.max,
                             &packed.non_null,
@@ -513,7 +495,7 @@ impl MetaStore {
         }
     }
 
-    fn apply_string_leaf_chunk_mask(&self, mask: &mut [bool], column: &str, cmp: CmpOp, rhs: &str) {
+    fn apply_string_leaf_chunk_mask(&self, mask: &mut BitVec, column: &str, cmp: CmpOp, rhs: &str) {
         for (i, chunk) in self.chunks.iter().enumerate() {
             if let Some(ZoneStat::String { bloom, non_null }) = chunk.stats.get(column) {
                 if *non_null == 0 {
@@ -522,16 +504,16 @@ impl MetaStore {
                 match cmp {
                     CmpOp::Eq => {
                         if bloom.contains(rhs.as_bytes()) {
-                            mask[i] = true;
+                            mask.set(i, true);
                         }
                     }
                     CmpOp::Neq => {
-                        mask[i] = true;
+                        mask.set(i, true);
                     }
                     _ => {}
                 }
             } else {
-                mask[i] = true; // conservatively keep when unknown
+                mask.set(i, true); // conservatively keep when unknown
             }
         }
     }
@@ -601,7 +583,6 @@ pub struct MetaQueryPlan<'a> {
     take_count: Option<usize>,
     take_scope: TakeScope,
     capture_stats: bool,
-    use_parallel: bool,
 }
 
 // Internal aggregation bucket for per-chunk processing
@@ -615,11 +596,12 @@ struct ChunkAgg {
 
 // Process a single chunk: run per-chunk VecStore query, apply optional row-level meta filter,
 // and collect results and counters. This function is thread-safe and does not capture &self.
+#[allow(clippy::too_many_arguments)]
 fn process_chunk(
     chunk: &MetaChunk,
     take_scope: &TakeScope,
     metric: &Metric,
-    queries: &Vec<Vec<f32>>,
+    queries: &[Vec<f32>],
     vec_filter: Option<(f32, VecCmp)>,
     meta_filter: Option<&CompiledFilter>,
     columns: &HashMap<String, Column>,
@@ -640,12 +622,8 @@ fn process_chunk(
     let row_mask_opt: Option<BitVec> =
         meta_filter.map(|cf| build_row_mask_for_chunk(cf, columns, chunk.base_offset, chunk.len));
 
-    let metric2 = match *metric {
-        Metric::Cosine => Metric::Cosine,
-        Metric::Euclidean => Metric::Euclidean,
-        Metric::DotProduct => Metric::DotProduct,
-    };
-    let mut plan = chunk.vec_store.query(queries.clone(), metric2);
+    let metric2 = *metric;
+    let mut plan = chunk.vec_store.query(queries.to_owned(), metric2);
     if let Some((thr, cmp)) = &vec_filter {
         plan = plan.filter(*thr, cmp.clone());
     }
@@ -822,14 +800,13 @@ impl<'a> MetaQueryPlan<'a> {
             take_count: None,
             take_scope: TakeScope::Local,
             capture_stats: false,
-            use_parallel: false,
         }
     }
 
     pub fn meta_filter(mut self, expr: Expr) -> Result<Self, String> {
         let compiled = expr
             .compile(&self.store.schema)
-            .map_err(|e| format!("meta_filter compile error: {}", e))?;
+            .map_err(|e| format!("meta_filter compile error: {e}"))?;
         self.meta_filter = Some(compiled);
         Ok(self)
     }
@@ -863,10 +840,7 @@ impl<'a> MetaQueryPlan<'a> {
         self
     }
 
-    pub fn with_parallel(mut self) -> Self {
-        self.use_parallel = true;
-        self
-    }
+    // parallel is always on; no with_parallel needed
 
     pub fn collect(self) -> Result<Vec<Vec<(usize, f32)>>, String> {
         let total_start = if self.capture_stats {
@@ -878,7 +852,7 @@ impl<'a> MetaQueryPlan<'a> {
             // default: number of rows across store
             self.store.chunks.iter().map(|c| c.len).sum()
         });
-        let take_type = self.take_type.unwrap_or_else(|| match self.metric {
+        let take_type = self.take_type.unwrap_or(match self.metric {
             Metric::Euclidean => TakeType::Min,
             _ => TakeType::Max,
         });
@@ -889,17 +863,17 @@ impl<'a> MetaQueryPlan<'a> {
         } else {
             None
         };
-        let mut candidate_chunks: Vec<&MetaChunk> = Vec::new();
-        if let Some(ref compiled) = self.meta_filter {
-            let mask = self.store.build_chunk_mask_for_plan(compiled);
-            for (i, m) in mask.into_iter().enumerate() {
-                if m {
-                    candidate_chunks.push(&self.store.chunks[i]);
-                }
-            }
-        } else {
-            candidate_chunks.extend(self.store.chunks.iter());
-        }
+        let candidate_chunks: Vec<&MetaChunk> = match self.meta_filter.as_ref() {
+            Some(compiled) => self
+                .store
+                .build_chunk_mask_for_plan(compiled)
+                .iter()
+                .by_vals()
+                .enumerate()
+                .filter(|&(i, keep)| keep).map(|(i, keep)| &self.store.chunks[i])
+                .collect(),
+            None => self.store.chunks.iter().collect(),
+        };
         let prune_duration = prune_start.map(|t| t.elapsed()).unwrap_or_default();
 
         // Aggregated results per-query (or single vector for global)
@@ -930,41 +904,22 @@ impl<'a> MetaQueryPlan<'a> {
         let meta_filter_ref = self.meta_filter.as_ref();
         let columns_ref = &self.store.columns;
 
-        let per_chunk: Vec<ChunkAgg> = if self.use_parallel {
-            candidate_chunks
-                .par_iter()
-                .map(|c| {
-                    process_chunk(
-                        c,
-                        &take_scope,
-                        metric_ref,
-                        queries_ref,
-                        vec_filter_opt.clone(),
-                        meta_filter_ref,
-                        columns_ref,
-                        k,
-                        n_queries,
-                    )
-                })
-                .collect()
-        } else {
-            candidate_chunks
-                .iter()
-                .map(|c| {
-                    process_chunk(
-                        c,
-                        &take_scope,
-                        metric_ref,
-                        queries_ref,
-                        vec_filter_opt.clone(),
-                        meta_filter_ref,
-                        columns_ref,
-                        k,
-                        n_queries,
-                    )
-                })
-                .collect()
-        };
+        let per_chunk: Vec<ChunkAgg> = candidate_chunks
+            .par_iter()
+            .map(|c| {
+                process_chunk(
+                    c,
+                    &take_scope,
+                    metric_ref,
+                    queries_ref,
+                    vec_filter_opt.clone(),
+                    meta_filter_ref,
+                    columns_ref,
+                    k,
+                    n_queries,
+                )
+            })
+            .collect();
 
         for agg in per_chunk {
             if self.capture_stats {
@@ -975,12 +930,12 @@ impl<'a> MetaQueryPlan<'a> {
             match take_scope {
                 TakeScope::Local => {
                     for (q_idx, mut v) in agg.results.into_iter().enumerate() {
-                        aggregated[q_idx].extend(v.drain(..));
+                        aggregated[q_idx].append(&mut v);
                     }
                 }
                 TakeScope::Global => {
                     let mut v = agg.results.into_iter().next().unwrap();
-                    aggregated[0].extend(v.drain(..));
+                    aggregated[0].append(&mut v);
                 }
             }
         }

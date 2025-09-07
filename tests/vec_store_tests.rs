@@ -724,24 +724,22 @@ fn test_cosine_similarity_correctness() {
     for (idx, sim) in &results[0] {
         if (sim - 1.0).abs() < 1e-6 {
             found_parallel = true;
-            assert_eq!(*idx, 0, "Parallel vector should be at index 0, got {}", idx);
+            assert_eq!(*idx, 0, "Parallel vector should be at index 0, got {idx}");
         } else if (sim - (-1.0)).abs() < 1e-6 {
             found_anti_parallel = true;
             assert_eq!(
                 *idx, 1,
-                "Anti-parallel vector should be at index 1, got {}",
-                idx
+                "Anti-parallel vector should be at index 1, got {idx}"
             );
         } else if sim.abs() < 1e-6 {
             found_orthogonal = true;
             assert_eq!(
                 *idx, 2,
-                "Orthogonal vector should be at index 2, got {}",
-                idx
+                "Orthogonal vector should be at index 2, got {idx}"
             );
         } else if (sim - (1.0 / 2.0_f32.sqrt())).abs() < 1e-5 {
             found_45deg = true;
-            assert_eq!(*idx, 3, "45° vector should be at index 3, got {}", idx);
+            assert_eq!(*idx, 3, "45° vector should be at index 3, got {idx}");
         }
     }
 
@@ -831,65 +829,59 @@ fn test_dot_product_correctness() {
         .unwrap();
 
     // Verify all dot products are mathematically correct
-    let mut found_results = vec![false; 6];
+    let mut found_results = [false; 6];
 
     for (idx, dot_product) in &results[0] {
         match *idx {
             0 => {
                 assert!(
                     (dot_product - 14.0).abs() < 1e-6,
-                    "Identical vector should have dot product 14.0, got {}",
-                    dot_product
+                    "Identical vector should have dot product 14.0, got {dot_product}"
                 );
                 found_results[0] = true;
             }
             1 => {
                 assert!(
                     (dot_product - 2.0).abs() < 1e-6,
-                    "Unit x vector should have dot product 2.0, got {}",
-                    dot_product
+                    "Unit x vector should have dot product 2.0, got {dot_product}"
                 );
                 found_results[1] = true;
             }
             2 => {
                 assert!(
                     (dot_product - 3.0).abs() < 1e-6,
-                    "Unit y vector should have dot product 3.0, got {}",
-                    dot_product
+                    "Unit y vector should have dot product 3.0, got {dot_product}"
                 );
                 found_results[2] = true;
             }
             3 => {
                 assert!(
                     (dot_product - 1.0).abs() < 1e-6,
-                    "Unit z vector should have dot product 1.0, got {}",
-                    dot_product
+                    "Unit z vector should have dot product 1.0, got {dot_product}"
                 );
                 found_results[3] = true;
             }
             4 => {
                 assert!(
                     (dot_product - (-2.0)).abs() < 1e-6,
-                    "Negative x vector should have dot product -2.0, got {}",
-                    dot_product
+                    "Negative x vector should have dot product -2.0, got {dot_product}"
                 );
                 found_results[4] = true;
             }
             5 => {
                 assert!(
                     (dot_product - 6.0).abs() < 1e-6,
-                    "Ones vector should have dot product 6.0, got {}",
-                    dot_product
+                    "Ones vector should have dot product 6.0, got {dot_product}"
                 );
                 found_results[5] = true;
             }
-            _ => panic!("Unexpected index {}", idx),
+            _ => panic!("Unexpected index {idx}"),
         }
     }
 
     // Verify all vectors were found
     for (i, found) in found_results.iter().enumerate() {
-        assert!(*found, "Vector at index {} not found in results", i);
+        assert!(*found, "Vector at index {i} not found in results");
     }
 
     // Verify results are sorted in descending order of dot product
@@ -1036,8 +1028,7 @@ fn test_filter_threshold_correctness() {
     for (_, sim) in &above_07[0] {
         assert!(
             *sim > 0.7,
-            "All results should have similarity > 0.7, got {}",
-            sim
+            "All results should have similarity > 0.7, got {sim}"
         );
     }
 
@@ -1053,8 +1044,7 @@ fn test_filter_threshold_correctness() {
     for (_, sim) in &above_equal_06[0] {
         assert!(
             *sim >= 0.6,
-            "All results should have similarity >= 0.6, got {}",
-            sim
+            "All results should have similarity >= 0.6, got {sim}"
         );
     }
 
@@ -1070,8 +1060,7 @@ fn test_filter_threshold_correctness() {
     for (_, sim) in &below_05[0] {
         assert!(
             *sim < 0.5,
-            "All results should have similarity < 0.5, got {}",
-            sim
+            "All results should have similarity < 0.5, got {sim}"
         );
     }
 }

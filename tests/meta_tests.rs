@@ -54,10 +54,24 @@ fn meta_string_eq_prunes_chunks() {
         vec![0.5, 0.5, 0.0],
     ];
     let ages = Column::new("age", DataType::Int32)
-        .from(vec![Some(10), Some(11), Some(12), Some(20), Some(21), Some(22)])
+        .from(vec![
+            Some(10),
+            Some(11),
+            Some(12),
+            Some(20),
+            Some(21),
+            Some(22),
+        ])
         .unwrap();
     let grades = Column::new("grade", DataType::String)
-        .from(vec![Some("B"), Some("C"), Some("B+"), Some("A"), Some("A"), Some("C")])
+        .from(vec![
+            Some("B"),
+            Some("C"),
+            Some("B+"),
+            Some("A"),
+            Some("A"),
+            Some("C"),
+        ])
         .unwrap();
     let meta = MetaStore::from_columns(vec![("age".into(), ages), ("grade".into(), grades)])
         .with_vectors(vectors)
@@ -98,7 +112,11 @@ fn meta_datetime_range_filter() {
     // Keep only rows in 2023
     let results = meta
         .query(vec![1.0, 0.0], Metric::DotProduct)
-        .meta_filter(col("ts").gte("2023-01-01T00:00:00Z").and(col("ts").lt("2024-01-01T00:00:00Z")))
+        .meta_filter(
+            col("ts")
+                .gte("2023-01-01T00:00:00Z")
+                .and(col("ts").lt("2024-01-01T00:00:00Z")),
+        )
         .unwrap()
         .with_stats()
         .take(3)
@@ -148,7 +166,9 @@ fn meta_global_scope_merge_and_vec_threshold() {
 #[test]
 fn meta_build_mismatched_column_len_errors() {
     let vectors = vec![vec![1.0], vec![2.0]];
-    let bad_col = Column::new("age", DataType::Int32).from(vec![Some(1)]).unwrap();
+    let bad_col = Column::new("age", DataType::Int32)
+        .from(vec![Some(1)])
+        .unwrap();
     let result = MetaStore::from_columns(vec![("age".into(), bad_col)])
         .with_vectors(vectors)
         .with_chunk_size(2)
@@ -172,5 +192,8 @@ fn meta_stats_without_meta_filter() {
         .collect()
         .unwrap();
     let stats = meta.last_query_stats().unwrap();
-    assert_eq!(stats.results_before_postfilter, stats.results_after_postfilter);
+    assert_eq!(
+        stats.results_before_postfilter,
+        stats.results_after_postfilter
+    );
 }

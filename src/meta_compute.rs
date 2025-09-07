@@ -4,6 +4,7 @@ use crate::col::Column;
 use crate::expr::{CmpOp, ColumnFilter, CompiledFilter, NumericLiteral};
 use crate::type_utils::DataType;
 use fastbloom::BloomFilter;
+// no wide/SIMD here; scalar loops are clearer and sufficient
 
 #[derive(Debug, Clone)]
 pub enum ZoneStat {
@@ -15,6 +16,7 @@ pub enum ZoneStat {
 
 // SIMD helpers moved to crate::types
 
+#[allow(clippy::needless_range_loop)]
 pub fn build_zone_stat_for_range(
     col: &Column,
     dtype: DataType,
@@ -29,7 +31,7 @@ pub fn build_zone_stat_for_range(
             let mut max_v = i64::MIN;
             let mut non_null = 0usize;
             for i in start..end {
-                if !mask.get(i).map_or(false, |b| *b) {
+                if !mask.get(i).is_some_and(|b| *b) {
                     let v = vals[i] as i64;
                     if v < min_v {
                         min_v = v;
@@ -52,7 +54,7 @@ pub fn build_zone_stat_for_range(
             let mut max_v = i64::MIN;
             let mut non_null = 0usize;
             for i in start..end {
-                if !mask.get(i).map_or(false, |b| *b) {
+                if !mask.get(i).is_some_and(|b| *b) {
                     let v = vals[i];
                     if v < min_v {
                         min_v = v;
@@ -75,7 +77,7 @@ pub fn build_zone_stat_for_range(
             let mut max_v = f64::NEG_INFINITY;
             let mut non_null = 0usize;
             for i in start..end {
-                if !mask.get(i).map_or(false, |b| *b) {
+                if !mask.get(i).is_some_and(|b| *b) {
                     let v = vals[i] as f64;
                     if v < min_v {
                         min_v = v;
@@ -98,7 +100,7 @@ pub fn build_zone_stat_for_range(
             let mut max_v = f64::NEG_INFINITY;
             let mut non_null = 0usize;
             for i in start..end {
-                if !mask.get(i).map_or(false, |b| *b) {
+                if !mask.get(i).is_some_and(|b| *b) {
                     let v = vals[i];
                     if v < min_v {
                         min_v = v;
@@ -117,12 +119,11 @@ pub fn build_zone_stat_for_range(
         }
         DataType::String => {
             // Build a Bloom filter sized for this chunk with ~1% false positive rate
-            let mut bloom =
-                BloomFilter::with_false_pos(0.01).expected_items((end - start) as usize);
+            let mut bloom = BloomFilter::with_false_pos(0.01).expected_items(end - start);
             let vals = col.string_values().ok_or("expected String column")?;
             let mut non_null = 0usize;
             for i in start..end {
-                if !mask.get(i).map_or(false, |b| *b) {
+                if !mask.get(i).is_some_and(|b| *b) {
                     bloom.insert(vals[i].as_bytes());
                     non_null += 1;
                 }
@@ -135,7 +136,7 @@ pub fn build_zone_stat_for_range(
             let mut max_v = i64::MIN;
             let mut non_null = 0usize;
             for i in start..end {
-                if !mask.get(i).map_or(false, |b| *b) {
+                if !mask.get(i).is_some_and(|b| *b) {
                     let v = vals[i];
                     if v < min_v {
                         min_v = v;
@@ -193,7 +194,7 @@ pub fn eval_leaf_row(leaf: &ColumnFilter, cols: &HashMap<String, Column>, idx: u
                 None => return false,
             };
             let mask = col.null_mask();
-            if mask.get(idx).map_or(false, |b| *b) {
+            if mask.get(idx).is_some_and(|b| *b) {
                 return false;
             }
             match col.dtype() {
@@ -226,7 +227,7 @@ pub fn eval_leaf_row(leaf: &ColumnFilter, cols: &HashMap<String, Column>, idx: u
                 None => return false,
             };
             let mask = col.null_mask();
-            if mask.get(idx).map_or(false, |b| *b) {
+            if mask.get(idx).is_some_and(|b| *b) {
                 return false;
             }
             let v = &col.string_values().unwrap()[idx];
