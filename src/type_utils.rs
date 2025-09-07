@@ -1,7 +1,10 @@
+//! Low-level SIMD wrapper types and masking helpers.
+//!
+//! Supplies ad‑hoc 8‑wide vectors (built from two 4‑wide lanes) plus masking
+//! utilities used by metadata pruning and row-level filtering. Where direct
+//! `wide` crate support exists we delegate; otherwise we compose manually.
 // Wrapper types that provide 8-wide SIMD operations using two 4-wide operations
-// partially vibe-coded :p
-// Not all traits are implemented for all types in wide.
-// Fall back non SIMD operations if necessary
+// Not all traits are implemented for all types in wide. Falls back to scalar logic when needed.
 #![allow(non_camel_case_types)]
 
 use bitvec::prelude::BitVec;
@@ -302,39 +305,46 @@ impl u64x8 {
 // SIMD helper functions (8-wide)
 // ==============================
 
-#[inline]
-pub fn mask8_rows_f32(
-    vals: &[f32],
-    nulls: &BitVec,
-    base: usize,
-    off: usize,
-    cmp: crate::expr::CmpOp,
-    thr: f32,
-) -> u8 {
-    let start = base + off;
-    let v = f32x8::from(&vals[start..start + 8]);
-    let t = f32x8::splat(thr);
-    let m = match cmp {
-        crate::expr::CmpOp::Eq => v.cmp_eq(t),
-        crate::expr::CmpOp::Neq => v.cmp_ne(t),
-        crate::expr::CmpOp::Lt => v.cmp_lt(t),
-        crate::expr::CmpOp::Lte => v.cmp_le(t),
-        crate::expr::CmpOp::Gt => v.cmp_gt(t),
-        crate::expr::CmpOp::Gte => v.cmp_ge(t),
-    };
-    let arr = m.to_array();
-    let mut bits: u8 = 0;
-    for (j, &val) in arr.iter().enumerate() {
-        let ok = val != 0.0;
-        let not_null = !nulls.get(start + j).map(|b| *b).unwrap_or(false);
-        if ok && not_null {
-            bits |= 1 << j;
+// Macro to generate mask8_rows_* for numeric types with similar semantics.
+// Keep only a macro for f32 (straightforward API); leave other types explicit.
+macro_rules! impl_mask8_rows_f32 {
+    () => {
+        pub fn mask8_rows_f32(
+            vals: &[f32],
+            nulls: &BitVec,
+            base: usize,
+            off: usize,
+            cmp: crate::expr::CmpOp,
+            thr: f32,
+        ) -> u8 {
+            let start = base + off;
+            let v = f32x8::from(&vals[start..start + 8]);
+            let t = f32x8::splat(thr);
+            let m = match cmp {
+                crate::expr::CmpOp::Eq => v.cmp_eq(t),
+                crate::expr::CmpOp::Neq => v.cmp_ne(t),
+                crate::expr::CmpOp::Lt => v.cmp_lt(t),
+                crate::expr::CmpOp::Lte => v.cmp_le(t),
+                crate::expr::CmpOp::Gt => v.cmp_gt(t),
+                crate::expr::CmpOp::Gte => v.cmp_ge(t),
+            };
+            let arr = m.to_array();
+            let mut bits: u8 = 0;
+            for (j, &val) in arr.iter().enumerate() {
+                let ok = val != 0.0;
+                let not_null = !nulls.get(start + j).map(|b| *b).unwrap_or(false);
+                if ok && not_null {
+                    bits |= 1 << j;
+                }
+            }
+            bits
         }
-    }
-    bits
+    };
 }
+impl_mask8_rows_f32!();
 
-#[inline]
+// Retain explicit implementations for i32 / branchy logic because of custom handling.
+// (f32 handled by macro above)
 pub fn mask8_rows_i32(
     vals: &[i32],
     nulls: &BitVec,

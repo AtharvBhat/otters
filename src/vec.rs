@@ -1,8 +1,11 @@
-#![allow(unused)]
-use crate::vec_compute::{TopKCollector, calculate_scores_chunk, calculate_scores_chunk_flat};
+//! Vector store and query planning primitives.
+//!
+//! Provides an in-memory row-major `VecStore` and a builder-style `VecQueryPlan`
+//! supporting cosine, dot product, and squared euclidean similarity with optional
+//! score filtering, local or global top-k selection, and row masking.
+use crate::vec_compute::{TopKCollector, calculate_scores_chunk_flat};
 pub use crate::vec_compute::{cosine_similarity, dot_product, euclidean_distance_squared};
 use bitvec::prelude::BitVec;
-use wide::*;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Metric {
@@ -62,124 +65,100 @@ impl<'a> VecQueryPlan<'a> {
         }
     }
 
-    pub fn with_vector_store(mut self, store: &'a VecStore) -> Self {
-        if self.error.is_some() {
-            return self;
+    #[inline]
+    fn map_ok(mut self, f: impl FnOnce(&mut Self)) -> Self {
+        if self.error.is_none() {
+            f(&mut self);
         }
-        self.vector_store = Some(store);
         self
     }
 
-    pub fn with_query_vectors(mut self, queries: impl Into<QueryBatch>) -> Self {
-        if self.error.is_some() {
-            return self;
+    #[inline]
+    fn infer_default_take_type(metric: &Metric) -> TakeType {
+        match metric {
+            Metric::Euclidean => TakeType::Min,
+            Metric::Cosine | Metric::DotProduct => TakeType::Max,
         }
-        let query_batch = queries.into();
-
-        let inv_norms: Vec<f32> = query_batch
-            .queries
-            .iter()
-            .map(|vec| {
-                let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if norm != 0.0 { 1.0 / norm } else { 0.0 }
-            })
-            .collect();
-        self.query_vectors = Some(query_batch.queries);
-        self.query_vectors_inv_norms = Some(inv_norms);
-        self
     }
 
-    pub fn with_metric(mut self, metric: Metric) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-        self.search_metric = Some(metric);
-        self
-    }
-
-    pub fn with_row_mask(mut self, mask: BitVec) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-        self.row_mask = Some(mask);
-        self
-    }
-
-    pub fn filter(mut self, score: f32, cmp: Cmp) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-        self.filter_criteria = Some((score, cmp));
-        self
-    }
-
-    pub fn take(mut self, count: usize) -> Self {
+    /// Generic helper powering all public `take*` variants. Determines scope, count
+    /// and (optionally) explicit `TakeType`. If `take_type` is None we infer one
+    /// from the already-selected metric (if present).
+    fn take_with_options(
+        mut self,
+        count: usize,
+        scope: TakeScope,
+        take_type: Option<TakeType>,
+    ) -> Self {
         if self.error.is_some() {
             return self;
         }
         self.take_count = Some(count);
-        match self.search_metric {
-            Some(Metric::Cosine) => self.take_type = Some(TakeType::Max),
-            Some(Metric::Euclidean) => self.take_type = Some(TakeType::Min),
-            Some(Metric::DotProduct) => self.take_type = Some(TakeType::Max),
-            None => {}
+        self.take_scope = scope;
+        if let Some(tt) = take_type {
+            self.take_type = Some(tt);
+        } else if self.take_type.is_none() {
+            if let Some(metric) = self.search_metric {
+                self.take_type = Some(Self::infer_default_take_type(&metric));
+            }
         }
         self
     }
 
-    pub fn take_global(mut self, count: usize) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-        self.take_count = Some(count);
-        self.take_scope = TakeScope::Global;
-        match self.search_metric {
-            Some(Metric::Cosine) => self.take_type = Some(TakeType::Max),
-            Some(Metric::Euclidean) => self.take_type = Some(TakeType::Min),
-            Some(Metric::DotProduct) => self.take_type = Some(TakeType::Max),
-            None => {}
-        }
-        self
+    pub fn with_vector_store(self, store: &'a VecStore) -> Self {
+        self.map_ok(|s| s.vector_store = Some(store))
     }
 
-    pub fn take_min(mut self, count: usize) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-        self.take_count = Some(count);
-        self.take_type = Some(TakeType::Min);
-        self.take_scope = TakeScope::Local;
-        self
+    pub fn with_query_vectors(self, queries: impl Into<QueryBatch>) -> Self {
+        self.map_ok(|s| {
+            let query_batch = queries.into();
+            let inv_norms: Vec<f32> = query_batch
+                .queries
+                .iter()
+                .map(|vec| {
+                    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm != 0.0 { 1.0 / norm } else { 0.0 }
+                })
+                .collect();
+            s.query_vectors = Some(query_batch.queries);
+            s.query_vectors_inv_norms = Some(inv_norms);
+        })
     }
 
-    pub fn take_min_global(mut self, count: usize) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-        self.take_count = Some(count);
-        self.take_type = Some(TakeType::Min);
-        self.take_scope = TakeScope::Global;
-        self
+    pub fn with_metric(self, metric: Metric) -> Self {
+        self.map_ok(|s| s.search_metric = Some(metric))
     }
 
-    pub fn take_max(mut self, count: usize) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-        self.take_count = Some(count);
-        self.take_type = Some(TakeType::Max);
-        self.take_scope = TakeScope::Local;
-        self
+    pub fn with_row_mask(self, mask: BitVec) -> Self {
+        self.map_ok(|s| s.row_mask = Some(mask))
     }
 
-    pub fn take_max_global(mut self, count: usize) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-        self.take_count = Some(count);
-        self.take_type = Some(TakeType::Max);
-        self.take_scope = TakeScope::Global;
-        self
+    pub fn filter(self, score: f32, cmp: Cmp) -> Self {
+        self.map_ok(|s| s.filter_criteria = Some((score, cmp)))
+    }
+
+    pub fn take(self, count: usize) -> Self {
+        self.take_with_options(count, TakeScope::Local, None)
+    }
+
+    pub fn take_global(self, count: usize) -> Self {
+        self.take_with_options(count, TakeScope::Global, None)
+    }
+
+    pub fn take_min(self, count: usize) -> Self {
+        self.take_with_options(count, TakeScope::Local, Some(TakeType::Min))
+    }
+
+    pub fn take_min_global(self, count: usize) -> Self {
+        self.take_with_options(count, TakeScope::Global, Some(TakeType::Min))
+    }
+
+    pub fn take_max(self, count: usize) -> Self {
+        self.take_with_options(count, TakeScope::Local, Some(TakeType::Max))
+    }
+
+    pub fn take_max_global(self, count: usize) -> Self {
+        self.take_with_options(count, TakeScope::Global, Some(TakeType::Max))
     }
 
     fn validate(&self) -> Result<(), String> {

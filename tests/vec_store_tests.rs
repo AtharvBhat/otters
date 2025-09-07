@@ -1,4 +1,4 @@
-// These tests have been AI generated to cover the VecStore functionality in the otters library.
+// Comprehensive tests covering VecStore functionality.
 use otters::vec::{Cmp, Metric, VecQueryPlan, VecStore};
 
 /// Helper function to create a standard set of test vectors for basic functionality tests
@@ -733,10 +733,7 @@ fn test_cosine_similarity_correctness() {
             );
         } else if sim.abs() < 1e-6 {
             found_orthogonal = true;
-            assert_eq!(
-                *idx, 2,
-                "Orthogonal vector should be at index 2, got {idx}"
-            );
+            assert_eq!(*idx, 2, "Orthogonal vector should be at index 2, got {idx}");
         } else if (sim - (1.0 / 2.0_f32.sqrt())).abs() < 1e-5 {
             found_45deg = true;
             assert_eq!(*idx, 3, "45° vector should be at index 3, got {idx}");

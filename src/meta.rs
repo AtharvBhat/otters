@@ -1,3 +1,10 @@
+//! Metadata-enhanced vector search with chunked zone-map pruning.
+//!
+//! The `MetaStore` couples a `VecStore` per chunk with auxiliary per-column
+//! zonemap statistics (min/max/null counts and light bloom filters) to prune
+//! irrelevant chunks before performing expensive vector similarity scoring.
+//! Queries can apply both metadata expressions and vector similarity filters
+//! with optional per-query or global top-k consolidation.
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -31,11 +38,12 @@ pub struct MetaStore {
     chunks: Vec<MetaChunk>,
     last_stats: std::cell::RefCell<Option<MetaQueryStats>>,
     build_stats: Option<MetaBuildStats>,
-    // Tightly packed per-chunk ranges to enable SIMD-friendly zonemap filtering
-    packed_ranges_f64: HashMap<String, PackedRangesF64>,
-    packed_ranges_i64: HashMap<String, PackedRangesI64>,
-    packed_ranges_f32: HashMap<String, PackedRangesF32>,
-    packed_ranges_i32: HashMap<String, PackedRangesI32>,
+    // Tightly packed per-chunk ranges to enable SIMD-friendly zonemap filtering.
+    // Generic form reduces boilerplate between numeric types.
+    packed_ranges_f64: HashMap<String, PackedRanges<f64>>,
+    packed_ranges_i64: HashMap<String, PackedRanges<i64>>,
+    packed_ranges_f32: HashMap<String, PackedRanges<f32>>,
+    packed_ranges_i32: HashMap<String, PackedRanges<i32>>,
 }
 
 #[derive(Debug)]
@@ -47,30 +55,9 @@ pub struct MetaStoreBuilder {
 }
 
 #[derive(Debug, Default, Clone)]
-struct PackedRangesF64 {
-    min: Vec<f64>,
-    max: Vec<f64>,
-    non_null: Vec<usize>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct PackedRangesI64 {
-    min: Vec<i64>,
-    max: Vec<i64>,
-    non_null: Vec<usize>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct PackedRangesF32 {
-    min: Vec<f32>,
-    max: Vec<f32>,
-    non_null: Vec<usize>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct PackedRangesI32 {
-    min: Vec<i32>,
-    max: Vec<i32>,
+struct PackedRanges<T> {
+    min: Vec<T>,
+    max: Vec<T>,
     non_null: Vec<usize>,
 }
 
@@ -174,10 +161,10 @@ impl MetaStoreBuilder {
         let mut zonemap_build_duration = Duration::default();
 
         // Prepare packed per-chunk ranges for SIMD-friendly filtering
-        let mut packed_ranges_f64: HashMap<String, PackedRangesF64> = HashMap::new();
-        let mut packed_ranges_i64: HashMap<String, PackedRangesI64> = HashMap::new();
-        let mut packed_ranges_f32: HashMap<String, PackedRangesF32> = HashMap::new();
-        let mut packed_ranges_i32: HashMap<String, PackedRangesI32> = HashMap::new();
+        let mut packed_ranges_f64: HashMap<String, PackedRanges<f64>> = HashMap::new();
+        let mut packed_ranges_i64: HashMap<String, PackedRanges<i64>> = HashMap::new();
+        let mut packed_ranges_f32: HashMap<String, PackedRanges<f32>> = HashMap::new();
+        let mut packed_ranges_i32: HashMap<String, PackedRanges<i32>> = HashMap::new();
 
         // Build chunks without cloning vectors: consume the owned vectors in order
         let mut chunks: Vec<MetaChunk> = Vec::new();
@@ -870,7 +857,8 @@ impl<'a> MetaQueryPlan<'a> {
                 .iter()
                 .by_vals()
                 .enumerate()
-                .filter(|&(i, keep)| keep).map(|(i, keep)| &self.store.chunks[i])
+                .filter(|&(_, keep)| keep)
+                .map(|(i, _)| &self.store.chunks[i])
                 .collect(),
             None => self.store.chunks.iter().collect(),
         };

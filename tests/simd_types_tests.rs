@@ -1,5 +1,5 @@
 // This file contains tests for the SIMD types defined in `otters::type_utils`.
-// AI generated :)
+// Tests for SIMD wrapper types and masking helpers.
 use otters::type_utils::*;
 
 #[cfg(test)]
