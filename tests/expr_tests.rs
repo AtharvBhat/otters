@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use otters::expr::{
     CmpOp, ColumnFilter, CompiledFilter, Expr, ExprError, NumericLiteral, col, lit,
 };
-use otters::types::DataType;
+use otters::type_utils::DataType;
 
 fn schema() -> HashMap<String, DataType> {
     use DataType::*;

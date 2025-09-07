@@ -2,6 +2,7 @@
 use crate::vec_compute::{TopKCollector, calculate_scores_chunk};
 pub use crate::vec_compute::{cosine_similarity, dot_product, euclidean_distance_squared};
 use wide::*;
+use bitvec::prelude::BitVec;
 
 #[derive(Debug)]
 pub enum Metric {
@@ -42,6 +43,7 @@ pub struct VecQueryPlan<'a> {
     take_scope: TakeScope,
     vector_store: Option<&'a VecStore>,
     error: Option<String>,
+    row_mask: Option<BitVec>,
 }
 
 impl<'a> VecQueryPlan<'a> {
@@ -56,6 +58,7 @@ impl<'a> VecQueryPlan<'a> {
             take_scope: TakeScope::Local,
             vector_store: None,
             error: None,
+            row_mask: None,
         }
     }
 
@@ -91,6 +94,14 @@ impl<'a> VecQueryPlan<'a> {
             return self;
         }
         self.search_metric = Some(metric);
+        self
+    }
+
+    pub fn with_row_mask(mut self, mask: BitVec) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+        self.row_mask = Some(mask);
         self
     }
 
@@ -250,7 +261,14 @@ impl<'a> VecQueryPlan<'a> {
                 match self.take_scope {
                     TakeScope::Global => {
                         scores_per_query.into_iter().for_each(|scores| {
-                            collectors[0].push_chunk(chunk_idx, scores);
+                            // Prepare optional row mask for this 8-lane block
+                            let block_mask = self.row_mask.as_ref().map(|rm| {
+                                let mut m = [true; 8];
+                                let base = chunk_idx * 8;
+                                for i in 0..8 { m[i] = rm.get(base + i).map(|br| *br).unwrap_or(true); }
+                                m
+                            });
+                            collectors[0].push_chunk_masked(chunk_idx, scores, block_mask);
                         });
                     }
                     TakeScope::Local => {
@@ -258,7 +276,13 @@ impl<'a> VecQueryPlan<'a> {
                             .into_iter()
                             .enumerate()
                             .for_each(|(q_idx, scores)| {
-                                collectors[q_idx].push_chunk(chunk_idx, scores);
+                                let block_mask = self.row_mask.as_ref().map(|rm| {
+                                    let mut m = [true; 8];
+                                    let base = chunk_idx * 8;
+                                    for i in 0..8 { m[i] = rm.get(base + i).map(|br| *br).unwrap_or(true); }
+                                    m
+                                });
+                                collectors[q_idx].push_chunk_masked(chunk_idx, scores, block_mask);
                             });
                     }
                 }
@@ -289,6 +313,9 @@ impl<'a> VecQueryPlan<'a> {
                                 Metric::DotProduct => dot_product(query, vec),
                             };
                             (remainder_start + i, score)
+                        })
+                        .filter(|(idx, _)| {
+                            if let Some(rm) = &self.row_mask { rm.get(*idx).map(|br| *br).unwrap_or(true) } else { true }
                         })
                         .collect();
 
@@ -364,6 +391,28 @@ impl VecStore {
         vectors.iter().try_for_each(|x| self.add_vector(x.to_vec()))
     }
 
+    // Move vectors into the store without cloning individual vectors
+    pub fn add_vectors_owned(&mut self, vectors: Vec<Vec<f32>>) -> Result<(), String> {
+        for vector in vectors.into_iter() {
+            if vector.len() != self.dim {
+                return Err(format!(
+                    "Input vector length {} does not match expected dimension {}",
+                    vector.len(),
+                    self.dim
+                ));
+            }
+            let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+            self.inv_norms.push(1.0 / norm);
+            self.n_vecs += 1;
+            self.vectors.push(vector);
+        }
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.n_vecs
+    }
+
     pub fn query(&self, queries: impl Into<QueryBatch>, metric: Metric) -> VecQueryPlan {
         let query_batch = queries.into();
 
@@ -386,6 +435,7 @@ impl VecStore {
             take_scope: TakeScope::Local,
             vector_store: Some(self),
             error: None,
+            row_mask: None,
         }
     }
 }

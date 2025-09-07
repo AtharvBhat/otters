@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 bitvec = "1.0.1"
 chrono = "0.4.41"
+fastbloom = "0.14.0"
 rand = "0.9.1"
+rayon = "1.11.0"
 wide = "0.7.33"
 
 [profile.perf]
@@ -14,4 +16,10 @@ inherits = "release"
 opt-level = 3
 debug = true
 lto = false
+codegen-units = 1
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = true
 codegen-units = 1

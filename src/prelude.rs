@@ -18,4 +18,5 @@ pub use crate::vec::{cosine_similarity, dot_product, euclidean_distance_squared}
 
 // Column functionality
 pub use crate::col::*;
-pub use crate::types::*;
+pub use crate::type_utils::*;
+pub use crate::meta::MetaStore;

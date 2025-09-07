@@ -1,5 +1,5 @@
 use otters::col::{Column, ColumnError};
-use otters::types::DataType;
+use otters::type_utils::DataType;
 
 #[cfg(test)]
 mod column_tests {
@@ -302,8 +302,7 @@ mod column_tests {
         // Test complete method chaining
         let result = Column::new("chained", DataType::Int32)
             .from(vec![1, 2, 3])
-            .and_then(|col| col.from(vec![4, 5]))
-            .map(|col| col.head());
+            .and_then(|col| col.from(vec![4, 5]));
 
         assert!(result.is_ok());
         let col = result.unwrap();

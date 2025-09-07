@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
-use crate::types::DataType;
+use crate::type_utils::DataType;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {

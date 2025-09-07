@@ -1,6 +1,6 @@
-// This file contains tests for the SIMD types defined in `otters::types`.
+// This file contains tests for the SIMD types defined in `otters::type_utils`.
 // AI generated :)
-use otters::types::*;
+use otters::type_utils::*;
 
 #[cfg(test)]
 mod i64x8_tests {

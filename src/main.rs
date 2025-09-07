@@ -73,7 +73,7 @@ fn demonstrate_column_api() -> Result<(), Box<dyn std::error::Error>> {
 
 fn demonstrate_expr_api() -> Result<(), Box<dyn std::error::Error>> {
     use otters::expr::col;
-    use otters::types::DataType;
+    use otters::type_utils::DataType;
     use std::collections::HashMap;
 
     // Build a simple schema
@@ -191,5 +191,154 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // demo Expr API
     demonstrate_expr_api()?;
 
+    // Demo: MetaStore with chunked zone-map pruning + vector search
+    // Build metadata columns equal in length to the vectors
+    use otters::expr::col;
+
+    let age_vals: Vec<Option<i32>> = (0..n_size)
+        .map(|i| {
+            if i % 11 == 0 {
+                None
+            } else {
+                Some((i % 60) as i32)
+            }
+        })
+        .collect();
+    let grades = ["A", "B+", "C", "A-", "B", "C+"];
+    let grade_vals: Vec<Option<String>> = (0..n_size)
+        .map(|i| {
+            if i % 13 == 0 {
+                None
+            } else {
+                Some(grades[i % grades.len()].to_string())
+            }
+        })
+        .collect();
+    let name_vals: Vec<Option<String>> = (0..n_size).map(|i| Some(format!("user_{}", i))).collect();
+
+    let columns = vec![
+        (
+            "age".to_string(),
+            Column::new("age", DataType::Int32).from(age_vals)?,
+        ),
+        (
+            "grade".to_string(),
+            Column::new("grade", DataType::String).from(grade_vals)?,
+        ),
+        (
+            "name".to_string(),
+            Column::new("name", DataType::String).from(name_vals)?,
+        ),
+    ];
+
+    let meta = MetaStore::from_columns(columns)
+        .with_vectors(v)
+        .with_chunk_size(1024)
+        .build()?;
+
+    let start_time = std::time::Instant::now();
+    let meta_results = meta
+        .query(test_vec.clone(), Metric::Cosine)
+        .meta_filter(col("age").gt(10) & col("grade").eq("A"))?
+        .vec_filter(0.1, Cmp::Gt)
+        .with_stats()
+        .take(5)
+        .collect()?;
+
+    println!(
+        "Meta query top 5: {:?} \n elapsed time: {:?}",
+        meta_results.get(0).unwrap_or(&Vec::new()),
+        start_time.elapsed()
+    );
+
+    meta.print_last_stats();
+
+    // Explore performance across multiple chunk sizes
+    let test_chunk_sizes = [256usize, 512, 1024, 2048, 4096];
+    println!("\n=== Chunk Size Sweep (serial + parallel) ===");
+    for &cs in &test_chunk_sizes {
+        // Build fresh metadata columns and vectors for each chunk size
+        let age_vals: Vec<Option<i32>> = (0..n_size)
+            .map(|i| {
+                if i % 11 == 0 {
+                    None
+                } else {
+                    Some((i % 60) as i32)
+                }
+            })
+            .collect();
+        let grades = ["A", "B+", "C", "A-", "B", "C+"];
+        let grade_vals: Vec<Option<String>> = (0..n_size)
+            .map(|i| {
+                if i % 13 == 0 {
+                    None
+                } else {
+                    Some(grades[i % grades.len()].to_string())
+                }
+            })
+            .collect();
+        let name_vals: Vec<Option<String>> =
+            (0..n_size).map(|i| Some(format!("user_{}", i))).collect();
+
+        let columns = vec![
+            (
+                "age".to_string(),
+                Column::new("age", DataType::Int32).from(age_vals)?,
+            ),
+            (
+                "grade".to_string(),
+                Column::new("grade", DataType::String).from(grade_vals)?,
+            ),
+            (
+                "name".to_string(),
+                Column::new("name", DataType::String).from(name_vals)?,
+            ),
+        ];
+
+        // Fresh vectors so we don't clone large buffers each iteration
+        let v_cs = get_random_vectors(n_size, dim);
+        let meta_cs = MetaStore::from_columns(columns)
+            .with_vectors(v_cs)
+            .with_chunk_size(cs)
+            .build()?;
+
+        // Serial
+        let start = std::time::Instant::now();
+        let _ = meta_cs
+            .query(test_vec.clone(), Metric::Cosine)
+            .meta_filter(col("age").gt(10).and(col("grade").eq("A")))?
+            .vec_filter(0.1, Cmp::Gt)
+            .with_stats()
+            .take(5)
+            .collect()?;
+        println!("[serial] chunk_size={} elapsed={:?}", cs, start.elapsed());
+        meta_cs.print_last_stats();
+
+        // Parallel
+        let start = std::time::Instant::now();
+        let _ = meta_cs
+            .query(test_vec.clone(), Metric::Cosine)
+            .meta_filter(col("age").gt(10).and(col("grade").eq("A")))?
+            .vec_filter(0.1, Cmp::Gt)
+            .with_parallel()
+            .with_stats()
+            .take(5)
+            .collect()?;
+        println!("[parallel] chunk_size={} elapsed={:?}", cs, start.elapsed());
+        meta_cs.print_last_stats();
+    }
+
+    // Parallel version for comparison
+    let start_time = std::time::Instant::now();
+    let _ = meta
+        .query(test_vec.clone(), Metric::Cosine)
+        .meta_filter(col("age").gt(10) & col("grade").eq("A"))?
+        .vec_filter(0.1, Cmp::Gt)
+        .with_parallel()
+        .with_stats()
+        .take(5)
+        .collect()?;
+    println!("Parallel meta elapsed time: {:?}", start_time.elapsed());
+    meta.print_last_stats();
     Ok(())
 }

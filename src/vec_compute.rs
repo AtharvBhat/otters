@@ -200,6 +200,28 @@ impl<'a> TopKCollector<'a> {
         }
     }
 
+    // Like push_chunk, but also applies an optional row mask for the 8-lane block
+    pub fn push_chunk_masked(&mut self, chunk_idx: usize, scores: f32x8, rowmask: Option<[bool; 8]>) {
+        if self.k == 0 {
+            return;
+        }
+
+        let threshold_mask = match self.get_effective_threshold() {
+            Some((threshold, cmp)) => filter_simd(scores, threshold, &cmp),
+            None => f32x8::splat(1.0),
+        };
+
+        let tmask = threshold_mask.to_array();
+        let smask = rowmask.unwrap_or([true; 8]);
+        let scores_arr = scores.to_array();
+
+        for i in 0..8 {
+            if smask[i] && tmask[i] != 0.0 {
+                self.push_single(chunk_idx * 8 + i, scores_arr[i]);
+            }
+        }
+    }
+
     pub fn push_scalars(&mut self, scores: Vec<(usize, f32)>) {
         if self.k == 0 {
             return;

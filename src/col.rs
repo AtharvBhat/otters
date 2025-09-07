@@ -1,4 +1,4 @@
-use crate::types::DataType;
+use crate::type_utils::DataType;
 use bitvec::prelude::*;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use std::fmt;
@@ -399,12 +399,12 @@ impl Column {
     }
 
     /// Display first 5 rows
-    pub fn head(self) -> Self {
+    pub fn head(&self) {
         self.head_n(5)
     }
 
     /// Display first n rows
-    pub fn head_n(self, n: usize) -> Self {
+    pub fn head_n(&self, n: usize) {
         println!("Column: {} ({:?})", self.name, self.dtype);
         let limit = self.len().min(n);
 
@@ -439,8 +439,6 @@ impl Column {
         if self.len() > n {
             println!("  ... ({} more rows)", self.len() - n);
         }
-
-        self
     }
 
     pub fn i32_values(&self) -> Option<&[i32]> {
@@ -498,6 +496,53 @@ impl Column {
             ColumnData::Float64(vec) => ColumnValues::Float64(vec),
             ColumnData::String(vec) => ColumnValues::String(vec),
             ColumnData::DateTime(vec) => ColumnValues::DateTime(vec),
+        }
+    }
+
+    /// Extend the column with a batch of values. Null mask entries are all set to false (non-null).
+    pub fn extend<'a>(&mut self, values: ColumnValues<'a>) -> Result<(), ColumnError> {
+        match (&mut self.data, values) {
+            (ColumnData::Int32(dest), ColumnValues::Int32(src)) => {
+                dest.extend(src.iter().cloned());
+                self.null_mask
+                    .extend(std::iter::repeat(false).take(src.len()));
+                Ok(())
+            }
+            (ColumnData::Int64(dest), ColumnValues::Int64(src)) => {
+                dest.extend(src.iter().cloned());
+                self.null_mask
+                    .extend(std::iter::repeat(false).take(src.len()));
+                Ok(())
+            }
+            (ColumnData::Float32(dest), ColumnValues::Float32(src)) => {
+                dest.extend(src.iter().cloned());
+                self.null_mask
+                    .extend(std::iter::repeat(false).take(src.len()));
+                Ok(())
+            }
+            (ColumnData::Float64(dest), ColumnValues::Float64(src)) => {
+                dest.extend(src.iter().cloned());
+                self.null_mask
+                    .extend(std::iter::repeat(false).take(src.len()));
+                Ok(())
+            }
+            (ColumnData::String(dest), ColumnValues::String(src)) => {
+                dest.extend(src.iter().cloned());
+                self.null_mask
+                    .extend(std::iter::repeat(false).take(src.len()));
+                Ok(())
+            }
+            (ColumnData::DateTime(dest), ColumnValues::DateTime(src)) => {
+                dest.extend(src.iter().cloned());
+                self.null_mask
+                    .extend(std::iter::repeat(false).take(src.len()));
+                Ok(())
+            }
+            // Type mismatch
+            _ => Err(ColumnError::TypeMismatch {
+                expected: self.dtype,
+                got: "mismatched batch values".to_string(),
+            }),
         }
     }
 }
