@@ -1,6 +1,6 @@
 [package]
 name = "otters-rs"
-version = "0.1.0-alpha1"
+version = "0.1.0-alpha2"
 edition = "2024"
 description = "High-performance vector search with metadata filtering"
 license = "MIT"
