@@ -30,7 +30,7 @@ let results = store
 
 // Build a MetaStore for metadata + vector pruning
 let columns = vec![
-    Column::new("item", DataType::Int32).from(item_vals)?,
+    Column::new("item", DataType::String).from(item_vals)?,
     Column::new("price", DataType::Float64).from(price_vals)?,
 ];
 

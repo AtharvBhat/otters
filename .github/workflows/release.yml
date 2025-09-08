@@ -13,8 +13,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Build
+        run: cargo build --verbose
+      - name: Test
+        run: cargo test --verbose
+      - name: Clippy (deny warnings)
+        run: cargo clippy -- -D warnings
+      - name: Format (check only)
+        run: cargo fmt --all -- --check
+      - name: Dry run publish
+        run: cargo publish --dry-run
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          cargo publish --no-verify
+        run: cargo publish
