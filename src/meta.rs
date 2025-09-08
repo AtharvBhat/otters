@@ -553,12 +553,12 @@ impl MetaStore {
     }
 
     /// Begin a query plan over this MetaStore with a single query vector
-    pub fn query(&self, query: Vec<f32>, metric: Metric) -> MetaQueryPlan {
+    pub fn query(&self, query: Vec<f32>, metric: Metric) -> MetaQueryPlan<'_> {
         MetaQueryPlan::new(self, vec![query], metric)
     }
 
     /// Begin a query plan with multiple query vectors
-    pub fn query_batch(&self, queries: Vec<Vec<f32>>, metric: Metric) -> MetaQueryPlan {
+    pub fn query_batch(&self, queries: Vec<Vec<f32>>, metric: Metric) -> MetaQueryPlan<'_> {
         MetaQueryPlan::new(self, queries, metric)
     }
 }
