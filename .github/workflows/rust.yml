@@ -32,9 +32,11 @@ jobs:
     name: MSRV 1.88
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-  - uses: dtolnay/rust-toolchain@1.88.0
-    - name: Build (MSRV)
-      run: cargo build -v
-    - name: Test (MSRV)
-      run: cargo test -v
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - name: Build (MSRV)
+        run: cargo build -v
+      - name: Test (MSRV)
+        run: cargo test -v
