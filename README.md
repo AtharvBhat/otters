@@ -44,7 +44,7 @@ let meta = MetaStore::from_columns(columns)
 use otters::expr::col;
 let top5 = meta
     .query(query_vec, Metric::Cosine)
-    .meta_filter(col("item").eq("rust") & col("price").gt(100.0))?
+    .meta_filter(col("item").eq("rust") & col("price").gt(100.0))
     .vec_filter(0.8, Cmp::Gt)
     .take(5)
     .collect()?;
@@ -103,7 +103,7 @@ let results = meta
         col("price").lte(40.0) 
         & col("version").gte(2) 
         & col("mfg").gte("2024-01-01") 
-        & col("exp").gte("2024-06-01"))?
+    & col("exp").gte("2024-06-01"))
     .take(5)
     .collect()?;
 

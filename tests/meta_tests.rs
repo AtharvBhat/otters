@@ -23,8 +23,7 @@ fn meta_basic_pruning_and_stats() {
 
     let results = meta
         .query(vec![1.0, 0.0, 0.0], Metric::Cosine)
-        .meta_filter(col("age").gt(15).and(col("grade").eq("A")))
-        .unwrap()
+    .meta_filter(col("age").gt(15).and(col("grade").eq("A")))
         .take(4)
         .collect()
         .unwrap();
@@ -79,8 +78,7 @@ fn meta_string_eq_prunes_chunks() {
     // meta filter only on grade=="A" should prune first chunk
     let _ = meta
         .query(vec![1.0, 0.0, 0.0], Metric::Cosine)
-        .meta_filter(col("grade").eq("A"))
-        .unwrap()
+    .meta_filter(col("grade").eq("A"))
         .take(6)
         .collect()
         .unwrap();
@@ -112,8 +110,7 @@ fn meta_datetime_range_filter() {
             col("ts")
                 .gte("2023-01-01T00:00:00Z")
                 .and(col("ts").lt("2024-01-01T00:00:00Z")),
-        )
-        .unwrap()
+    )
         .take(3)
         .collect()
         .unwrap();
@@ -141,8 +138,7 @@ fn meta_global_scope_merge_and_vec_threshold() {
     let queries = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
     let results = meta
         .query_batch(queries, Metric::DotProduct)
-        .meta_filter(col("grade").eq("A"))
-        .unwrap()
+    .meta_filter(col("grade").eq("A"))
         .vec_filter(0.5, Cmp::Gt)
         .take(2)
         .collect()

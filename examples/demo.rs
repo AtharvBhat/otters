@@ -107,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .meta_filter(
             // Prunes all even-numbered chunks (price high, exp in 2024, version 1)
             col("price").lt(50.0) & col("version").gte(2) & col("exp").gte("2025-01-01"),
-        )?
+    )
         .vec_filter(0.1, Cmp::Gt)
         .take(5)
         .collect()?;

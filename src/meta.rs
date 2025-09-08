@@ -569,6 +569,8 @@ pub struct MetaQueryPlan<'a> {
     queries: Vec<Vec<f32>>,
     metric: Metric,
     meta_filter: Option<CompiledFilter>,
+    // If meta_filter expr compilation fails, store the error here and surface on collect()
+    meta_error: Option<String>,
     vec_filter: Option<(f32, VecCmp)>,
     take_type: Option<TakeType>,
     take_count: Option<usize>,
@@ -581,18 +583,24 @@ impl<'a> MetaQueryPlan<'a> {
             queries,
             metric,
             meta_filter: None,
+            meta_error: None,
             vec_filter: None,
             take_type: None,
             take_count: None,
         }
     }
 
-    pub fn meta_filter(mut self, expr: Expr) -> Result<Self, String> {
-        let compiled = expr
-            .compile(&self.store.schema)
-            .map_err(|e| format!("meta_filter compile error: {e}"))?;
-        self.meta_filter = Some(compiled);
-        Ok(self)
+    pub fn meta_filter(mut self, expr: Expr) -> Self {
+        match expr.compile(&self.store.schema) {
+            Ok(compiled) => {
+                self.meta_filter = Some(compiled);
+                self.meta_error = None;
+            }
+            Err(e) => {
+                self.meta_error = Some(format!("meta_filter compile error: {e}"));
+            }
+        }
+        self
     }
 
     pub fn vec_filter(mut self, score: f32, cmp: VecCmp) -> Self {
@@ -610,6 +618,10 @@ impl<'a> MetaQueryPlan<'a> {
     }
 
     pub fn collect(self) -> Result<MetaQueryResults, String> {
+        // Surface any deferred meta filter compilation errors first
+        if let Some(err) = self.meta_error {
+            return Err(err);
+        }
         let total_start = Instant::now();
         let k = self
             .take_count
