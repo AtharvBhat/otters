@@ -1,5 +1,9 @@
 # otters 🦦
 
+[![Crates.io](https://img.shields.io/crates/v/otters.svg)](https://crates.io/crates/otters)
+[![Docs.rs](https://docs.rs/otters/badge.svg)](https://docs.rs/otters)
+[![CI](https://github.com/AtharvBhat/otters/actions/workflows/rust.yml/badge.svg)](https://github.com/AtharvBhat/otters/actions/workflows/rust.yml)
+
 Otters is a minimal, exact vector search library with expressive metadata filtering. Think “Polars for vector search.”
 
 Otters targets smaller to mid-size datasets (up to ~10M vectors) where:
@@ -11,7 +15,7 @@ The design leans on chunked zonemaps (min/max/null counts + light Bloom filters)
 
 ## Quick Start
 
-```rust
+```rust,ignore
 use otters::prelude::*;
 
 // Basic vector search
@@ -27,7 +31,7 @@ let results = store
 // Build a MetaStore for metadata + vector pruning
 let columns = vec![
     Column::new("item", DataType::Int32).from(item_vals)?,
-    Column::new("price", DataType::String).from(price_vals)?,
+    Column::new("price", DataType::Float64).from(price_vals)?,
 ];
 
 let meta = MetaStore::from_columns(columns)
@@ -52,7 +56,7 @@ meta.print_last_stats();
 
 Otters implements `Display` for result sets and prints MetaStore heads and stats as ASCII tables. Here’s a compact, deterministic example:
 
-```rust
+```rust,ignore
 use otters::prelude::*;
 
 // Small item catalog (8 rows, 4 dims)
@@ -106,7 +110,7 @@ meta.print_last_query_stats();
 
 Sample output:
 
-```
+```text
 MetaStore Head • rows=8 • chunks=2 • chunk_size=4
 +-------+-------------------------+-------------------------+---------+---------+---------+
 | index | exp                     | mfg                     | name    | price   | version |
@@ -188,6 +192,12 @@ let e1 = col("age").gt(25) & col("score").gte(80.0);
 let e2 = (col("age").lt(18) | col("age").gt(65)) & col("name").neq("alice");
 let e3 = col("grade").eq("A") | col("grade").eq("B");
 ```
+
+## Status and stability
+
+This project is early-stage. Expect frequent breaking changes
+- Current pre-release: 0.1.0-alpha1.
+- MSRV: 1.88.
 
 ## Roadmap
 - Test with real datasets

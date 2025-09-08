@@ -1,20 +1,40 @@
 [package]
 name = "otters"
-version = "0.1.0"
+version = "0.1.0-alpha1"
 edition = "2024"
 description = "High-performance vector search with metadata filtering"
 license = "MIT"
 repository = "https://github.com/atharvbhat/otters"
 readme = "README.md"
+documentation = "https://docs.rs/otters"
+rust-version = "1.88"
+keywords = ["vector-search", "similarity-search", "semantic-search", "embeddings", "data-science"]
+categories = ["algorithms", "data-structures", "development-tools", "science"]
+
+# Keep the published crate lean
+include = [
+    "src/**",
+    "examples/**",
+    "CHANGELOG.md",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 bitvec = "1.0.1"
 chrono = "0.4.41"
 fastbloom = "0.14.0"
 itertools = "0.12.1"
-rand = "0.9.1"
 rayon = "1.11.0"
 wide = "0.7.33"
+
+[dev-dependencies]
+rand = "0.9.1"
 
 
 [profile.perf]
