@@ -1,3 +1,4 @@
+use crate::col::Column;
 use crate::meta::{MetaBuildStats, MetaQueryResults, MetaQueryStats, MetaStore};
 use crate::type_utils::DataType;
 use chrono::DateTime;
@@ -93,6 +94,30 @@ impl fmt::Display for AsciiTable {
     }
 }
 
+// Render a single cell from a Column at row index `i` into a String
+fn format_cell(col: &Column, i: usize) -> String {
+    let is_null = col.null_mask().get(i).map(|b| *b).unwrap_or(false);
+    if is_null {
+        return "NULL".to_string();
+    }
+
+    match col.dtype() {
+        DataType::Int32 => col.i32_values().map(|v| v[i].to_string()).unwrap(),
+        DataType::Int64 => col.i64_values().map(|v| v[i].to_string()).unwrap(),
+        DataType::Float32 => col.f32_values().map(|v| format!("{:.4}", v[i])).unwrap(),
+        DataType::Float64 => col.f64_values().map(|v| format!("{:.4}", v[i])).unwrap(),
+        DataType::String => col.string_values().map(|v| v[i].clone()).unwrap(),
+        DataType::DateTime => col
+            .datetime_values()
+            .map(|v| {
+                DateTime::from_timestamp_millis(v[i])
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .unwrap_or_else(|| format!("{}", v[i]))
+            })
+            .unwrap(),
+    }
+}
+
 /// Pretty-print the head of a MetaStore as an ASCII table.
 pub fn metastore_head(meta: &MetaStore, n: usize) -> String {
     let mut cols: Vec<String> = meta.schema().keys().cloned().collect();
@@ -114,33 +139,9 @@ pub fn metastore_head(meta: &MetaStore, n: usize) -> String {
         row.push(i.to_string());
         for name in &cols {
             if let Some(col) = meta.columns().get(name) {
-                let is_null = col.null_mask().get(i).map(|b| *b).unwrap_or(false);
-                if is_null {
-                    row.push("NULL".to_string());
-                } else {
-                    let cell = match col.dtype() {
-                        DataType::Int32 => col.i32_values().map(|v| v[i].to_string()).unwrap(),
-                        DataType::Int64 => col.i64_values().map(|v| v[i].to_string()).unwrap(),
-                        DataType::Float32 => {
-                            col.f32_values().map(|v| format!("{:.4}", v[i])).unwrap()
-                        }
-                        DataType::Float64 => {
-                            col.f64_values().map(|v| format!("{:.4}", v[i])).unwrap()
-                        }
-                        DataType::String => col.string_values().map(|v| v[i].clone()).unwrap(),
-                        DataType::DateTime => col
-                            .datetime_values()
-                            .map(|v| {
-                                DateTime::from_timestamp_millis(v[i])
-                                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                                    .unwrap_or_else(|| format!("{}", v[i]))
-                            })
-                            .unwrap(),
-                    };
-                    row.push(cell);
-                }
+                row.push(format_cell(col, i));
             } else {
-                row.push("".to_string());
+                row.push(String::new());
             }
         }
         rows.push(row);
@@ -169,31 +170,7 @@ impl fmt::Display for MetaQueryResults {
             ];
             for c in &self.columns {
                 if let Some(col) = self.data.get(c) {
-                    let is_null = col.null_mask().get(i).map(|b| *b).unwrap_or(false);
-                    if is_null {
-                        line.push("NULL".to_string());
-                    } else {
-                        let cell = match col.dtype() {
-                            DataType::Int32 => col.i32_values().map(|v| v[i].to_string()).unwrap(),
-                            DataType::Int64 => col.i64_values().map(|v| v[i].to_string()).unwrap(),
-                            DataType::Float32 => {
-                                col.f32_values().map(|v| format!("{:.4}", v[i])).unwrap()
-                            }
-                            DataType::Float64 => {
-                                col.f64_values().map(|v| format!("{:.4}", v[i])).unwrap()
-                            }
-                            DataType::String => col.string_values().map(|v| v[i].clone()).unwrap(),
-                            DataType::DateTime => col
-                                .datetime_values()
-                                .map(|v| {
-                                    DateTime::from_timestamp_millis(v[i])
-                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                                        .unwrap_or_else(|| format!("{}", v[i]))
-                                })
-                                .unwrap(),
-                        };
-                        line.push(cell);
-                    }
+                    line.push(format_cell(col, i));
                 } else {
                     line.push(String::new());
                 }

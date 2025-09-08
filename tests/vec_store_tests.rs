@@ -876,7 +876,7 @@ fn test_filter_threshold_correctness() {
 
     let above_equal_06 = store
         .query(query.clone(), Metric::Cosine)
-        .filter(0.6, Cmp::Geq)
+        .filter(0.6, Cmp::Gte)
         .take(10)
         .collect()
         .unwrap();
@@ -1060,19 +1060,19 @@ fn test_filter_with_all_comparison_operators() {
         .unwrap();
     assert!(!results.is_empty());
 
-    // Test Leq filter
+    // Test Lte filter
     let results = store
         .query(query.clone(), Metric::Cosine)
-        .filter(1.0, Cmp::Leq)
+        .filter(1.0, Cmp::Lte)
         .take(10)
         .collect()
         .unwrap();
     assert!(!results.is_empty());
 
-    // Test Geq filter
+    // Test Gte filter
     let results = store
         .query(query.clone(), Metric::Cosine)
-        .filter(0.0, Cmp::Geq)
+        .filter(0.0, Cmp::Gte)
         .take(10)
         .collect()
         .unwrap();

@@ -84,8 +84,8 @@ fn filter_simd(scores: f32x8, threshold: f32, cmp: &Cmp) -> f32x8 {
     match cmp {
         Cmp::Lt => scores.cmp_lt(threshold_simd),
         Cmp::Gt => scores.cmp_gt(threshold_simd),
-        Cmp::Leq => scores.cmp_le(threshold_simd),
-        Cmp::Geq => scores.cmp_ge(threshold_simd),
+        Cmp::Lte => scores.cmp_le(threshold_simd),
+        Cmp::Gte => scores.cmp_ge(threshold_simd),
         Cmp::Eq => scores.cmp_eq(threshold_simd),
     }
 }
@@ -114,11 +114,11 @@ impl<'a> TopKCollector<'a> {
             Some((filter_threshold, filter_cmp)) => {
                 // Determine which threshold is more restrictive
                 let combined_threshold = match (take_type, filter_cmp) {
-                    (TakeType::Min, Cmp::Lt) | (TakeType::Min, Cmp::Leq) => {
+                    (TakeType::Min, Cmp::Lt) | (TakeType::Min, Cmp::Lte) => {
                         // For min operations, use the smaller threshold
                         Some(filter_threshold.min(threshold))
                     }
-                    (TakeType::Max, Cmp::Gt) | (TakeType::Max, Cmp::Geq) => {
+                    (TakeType::Max, Cmp::Gt) | (TakeType::Max, Cmp::Gte) => {
                         // For max operations, use the larger threshold
                         Some(filter_threshold.max(threshold))
                     }
@@ -162,10 +162,10 @@ impl<'a> TopKCollector<'a> {
             if let Some(ref mut eff_threshold) = self.effective_threshold {
                 // Update the effective threshold based on current topk threshold and filter
                 match (&self.take_type, &self.effective_cmp) {
-                    (TakeType::Min, Some(Cmp::Lt)) | (TakeType::Min, Some(Cmp::Leq)) => {
+                    (TakeType::Min, Some(Cmp::Lt)) | (TakeType::Min, Some(Cmp::Lte)) => {
                         *eff_threshold = eff_threshold.min(self.threshold);
                     }
-                    (TakeType::Max, Some(Cmp::Gt)) | (TakeType::Max, Some(Cmp::Geq)) => {
+                    (TakeType::Max, Some(Cmp::Gt)) | (TakeType::Max, Some(Cmp::Gte)) => {
                         *eff_threshold = eff_threshold.max(self.threshold);
                     }
                     _ => {} // For other comparisons, keep filter threshold
@@ -220,8 +220,8 @@ impl<'a> TopKCollector<'a> {
                 .filter(|&(_, score)| match cmp {
                     Cmp::Lt => score < *threshold,
                     Cmp::Gt => score > *threshold,
-                    Cmp::Leq => score <= *threshold,
-                    Cmp::Geq => score >= *threshold,
+                    Cmp::Lte => score <= *threshold,
+                    Cmp::Gte => score >= *threshold,
                     Cmp::Eq => score == *threshold,
                 })
                 .collect(),

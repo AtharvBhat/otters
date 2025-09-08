@@ -25,8 +25,8 @@ pub enum TakeType {
 pub enum Cmp {
     Lt,
     Gt,
-    Leq,
-    Geq,
+    Lte,
+    Gte,
     Eq, // Idk why you would ever use this
 }
 
