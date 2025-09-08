@@ -51,7 +51,7 @@ mod column_tests {
     fn test_unified_push_float32() {
         let mut col = Column::new("floats", DataType::Float32);
 
-        assert!(col.push(3.14f32).is_ok());
+        assert!(col.push(std::f32::consts::PI).is_ok());
         assert!(col.push(Some(2.71f32)).is_ok());
         assert!(col.push(None::<f32>).is_ok());
         assert_eq!(col.len(), 3);
@@ -61,8 +61,8 @@ mod column_tests {
     fn test_unified_push_float64() {
         let mut col = Column::new("doubles", DataType::Float64);
 
-        assert!(col.push(3.14159).is_ok());
-        assert!(col.push(Some(2.71828)).is_ok());
+        assert!(col.push(std::f64::consts::PI).is_ok());
+        assert!(col.push(Some(std::f64::consts::E)).is_ok());
         assert!(col.push(None::<f64>).is_ok());
         assert_eq!(col.len(), 3);
     }
@@ -130,7 +130,7 @@ mod column_tests {
         let mut float_col = Column::new("floats", DataType::Float32);
 
         // This should work - f32 to Float32 column
-        assert!(float_col.push(3.14f32).is_ok());
+        assert!(float_col.push(std::f32::consts::PI).is_ok());
 
         // Test that the unified API prevents type mismatches at compile time
         // (These wouldn't compile, which is what we want)

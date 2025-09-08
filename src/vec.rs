@@ -4,9 +4,10 @@
 //! supporting cosine, dot product, and squared euclidean similarity with optional
 //! score filtering and row masking. Batch queries are treated as a single search
 //! over multiple inputs and return one merged result set.
-use crate::vec_compute::{TopKCollector, calculate_scores_chunk_flat};
+use crate::vec_compute::TopKCollector;
 pub use crate::vec_compute::{cosine_similarity, dot_product, euclidean_distance_squared};
 use bitvec::prelude::BitVec;
+use wide::f32x8;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Metric {
@@ -220,26 +221,43 @@ impl<'a> VecQueryPlan<'a> {
             .enumerate()
             .for_each(|(chunk_idx, inv_chunk)| {
                 let base_row = chunk_idx * 8;
-                let scores_per_query = calculate_scores_chunk_flat(
-                    query_vectors,
-                    query_vectors_inv_norms,
-                    &vector_store.vectors,
-                    vector_store.dim,
-                    base_row,
-                    inv_chunk,
-                    search_metric,
-                );
-
-                let block_mask = |rm: &BitVec| {
+                // Compute block row mask once per chunk
+                let bm: Option<[bool; 8]> = self.row_mask.as_ref().map(|rm| {
                     let mut m = [true; 8];
-                    (0..8).for_each(|i| m[i] = rm.get(base_row + i).map(|br| *br).unwrap_or(true));
+                    for (i, mi) in m.iter_mut().enumerate() {
+                        *mi = rm.get(base_row + i).map(|br| *br).unwrap_or(true);
+                    }
                     m
-                };
-
-                scores_per_query.into_iter().for_each(|scores| {
-                    let bm = self.row_mask.as_ref().map(block_mask);
-                    collector.push_chunk_masked(chunk_idx, scores, bm);
                 });
+
+                // Reuse preallocated scratch for scores across queries
+                let mut scratch = [0.0f32; 8];
+
+                // Compute and push scores per query without allocating a Vec
+                query_vectors
+                    .iter()
+                    .zip(query_vectors_inv_norms.iter())
+                    .for_each(|(query, &query_inv_norm)| {
+                        for i in 0..8 {
+                            if let Some(mask) = bm.as_ref() {
+                                if !mask[i] {
+                                    continue;
+                                }
+                            }
+                            let row = base_row + i;
+                            let start = row * vector_store.dim;
+                            let v = &vector_store.vectors[start..start + vector_store.dim];
+                            scratch[i] = match search_metric {
+                                Metric::Cosine => {
+                                    cosine_similarity(query, v, query_inv_norm, inv_chunk[i])
+                                }
+                                Metric::Euclidean => euclidean_distance_squared(query, v),
+                                Metric::DotProduct => dot_product(query, v),
+                            };
+                        }
+                        let scores = f32x8::from(scratch);
+                        collector.push_chunk_masked(chunk_idx, scores, bm);
+                    });
             });
 
         // Process remainder

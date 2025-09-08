@@ -115,8 +115,8 @@ mod f64x8_tests {
 
     #[test]
     fn test_f64x8_splat() {
-        let vec = f64x8::splat(3.14);
-        let slice = [3.14f64; 8];
+        let vec = f64x8::splat(std::f64::consts::PI);
+        let slice = [std::f64::consts::PI; 8];
         let expected = f64x8::from_slice(&slice);
 
         let mask = vec.cmp_eq(expected);

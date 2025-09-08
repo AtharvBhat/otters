@@ -1,4 +1,4 @@
-use crate::vec::{Cmp, Metric, TakeType};
+use crate::vec::{Cmp, TakeType};
 use wide::*;
 
 #[inline(always)]
@@ -49,45 +49,24 @@ pub fn euclidean_distance_squared(vec1: &[f32], vec2: &[f32]) -> f32 {
             .sum::<f32>()
 }
 
-#[inline(always)]
-pub fn calculate_scores_chunk_flat(
-    queries: &[Vec<f32>],
-    query_inv_norms: &[f32],
-    flat_vectors: &[f32],
-    dim: usize,
-    base_row: usize,
-    inv_norms: &[f32],
-    metric: &Metric,
-) -> Vec<f32x8> {
-    queries
-        .iter()
-        .zip(query_inv_norms.iter())
-        .map(|(query, &query_inv_norm)| {
-            let mut scores = [0.0f32; 8];
-            for i in 0..8 {
-                let row = base_row + i;
-                let start = row * dim;
-                let v = &flat_vectors[start..start + dim];
-                scores[i] = match metric {
-                    Metric::Cosine => cosine_similarity(query, v, query_inv_norm, inv_norms[i]),
-                    Metric::Euclidean => euclidean_distance_squared(query, v),
-                    Metric::DotProduct => dot_product(query, v),
-                };
-            }
-            f32x8::from(&scores[..])
-        })
-        .collect()
-}
-
-fn filter_simd(scores: f32x8, threshold: f32, cmp: &Cmp) -> f32x8 {
-    let threshold_simd = f32x8::splat(threshold);
-    match cmp {
-        Cmp::Lt => scores.cmp_lt(threshold_simd),
-        Cmp::Gt => scores.cmp_gt(threshold_simd),
-        Cmp::Lte => scores.cmp_le(threshold_simd),
-        Cmp::Gte => scores.cmp_ge(threshold_simd),
-        Cmp::Eq => scores.cmp_eq(threshold_simd),
+fn filter_mask_bits(scores: f32x8, threshold: f32, cmp: &Cmp) -> u8 {
+    let t = f32x8::splat(threshold);
+    let m = match cmp {
+        Cmp::Lt => scores.cmp_lt(t),
+        Cmp::Gt => scores.cmp_gt(t),
+        Cmp::Lte => scores.cmp_le(t),
+        Cmp::Gte => scores.cmp_ge(t),
+        Cmp::Eq => scores.cmp_eq(t),
+    };
+    // Convert boolean lanes to a compact 8-bit mask
+    let arr = m.to_array();
+    let mut bits: u8 = 0;
+    for (i, &v) in arr.iter().enumerate() {
+        if v != 0.0 {
+            bits |= 1 << i;
+        }
     }
+    bits
 }
 
 // Top-K collector with integrated filtering
@@ -192,18 +171,34 @@ impl<'a> TopKCollector<'a> {
             return;
         }
 
-        let threshold_mask = match self.get_effective_threshold() {
-            Some((threshold, cmp)) => filter_simd(scores, threshold, &cmp),
-            None => f32x8::splat(1.0),
+        // Build threshold mask bits
+        let tbits: u8 = match self.get_effective_threshold() {
+            Some((threshold, cmp)) => filter_mask_bits(scores, threshold, &cmp),
+            None => 0xFF,
         };
 
-        let tmask = threshold_mask.to_array();
-        let smask = rowmask.unwrap_or([true; 8]);
-        let scores_arr = scores.to_array();
+        // Row mask bits (all ones if no mask)
+        let sbits: u8 = match rowmask {
+            Some(m) => {
+                let mut b = 0u8;
+                for (i, &on) in m.iter().enumerate() {
+                    if on {
+                        b |= 1 << i;
+                    }
+                }
+                b
+            }
+            None => 0xFF,
+        };
 
-        for i in 0..8 {
-            if smask[i] && tmask[i] != 0.0 {
-                self.push_single(chunk_idx * 8 + i, scores_arr[i]);
+        let bits = tbits & sbits;
+        if bits == 0 {
+            return;
+        }
+        let scores_arr = scores.to_array();
+        for (i, &score) in scores_arr.iter().enumerate() {
+            if (bits >> i) & 1 == 1 {
+                self.push_single(chunk_idx * 8 + i, score);
             }
         }
     }
