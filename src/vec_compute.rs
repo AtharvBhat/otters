@@ -49,33 +49,7 @@ pub fn euclidean_distance_squared(vec1: &[f32], vec2: &[f32]) -> f32 {
             .sum::<f32>()
 }
 
-// Calculate scores for all queries for a chunk of 8 vectors
-#[inline(always)]
-pub fn calculate_scores_chunk(
-    queries: &[Vec<f32>],
-    query_inv_norms: &[f32],
-    vectors: &[Vec<f32>],
-    inv_norms: &[f32],
-    metric: &Metric,
-) -> Vec<f32x8> {
-    queries
-        .iter()
-        .zip(query_inv_norms.iter())
-        .map(|(query, &query_inv_norm)| {
-            let mut scores = [0.0f32; 8];
-            for i in 0..8 {
-                scores[i] = match metric {
-                    Metric::Cosine => {
-                        cosine_similarity(query, &vectors[i], query_inv_norm, inv_norms[i])
-                    }
-                    Metric::Euclidean => euclidean_distance_squared(query, &vectors[i]),
-                    Metric::DotProduct => dot_product(query, &vectors[i]),
-                };
-            }
-            f32x8::from(&scores[..])
-        })
-        .collect()
-}
+// calculate_scores_chunk (vector-of-vectors) removed; flat buffer variant is used in VecStore
 
 // Calculate scores for all queries for a chunk of 8 vectors in a flat (row-major) buffer
 #[inline(always)]
@@ -210,26 +184,7 @@ impl<'a> TopKCollector<'a> {
         }
     }
 
-    pub fn push_chunk(&mut self, chunk_idx: usize, scores: f32x8) {
-        if self.k == 0 {
-            return;
-        }
-
-        // Apply effective threshold
-        let mask = match self.get_effective_threshold() {
-            Some((threshold, cmp)) => filter_simd(scores, threshold, &cmp),
-            None => f32x8::splat(1.0),
-        };
-
-        let mask_arr = mask.to_array();
-        let scores_arr = scores.to_array();
-
-        for i in 0..8 {
-            if mask_arr[i] != 0.0 {
-                self.push_single(chunk_idx * 8 + i, scores_arr[i]);
-            }
-        }
-    }
+    // push_chunk removed; use push_chunk_masked or push_scalars
 
     // Like push_chunk, but also applies an optional row mask for the 8-lane block
     pub fn push_chunk_masked(

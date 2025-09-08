@@ -11,12 +11,17 @@
 pub use crate::vec::{QueryBatch, VecQueryPlan, VecStore};
 
 // Enums for configuration
-pub use crate::vec::{Cmp, Metric, TakeScope, TakeType};
+pub use crate::vec::{Cmp, Metric, TakeType};
 
 // Commonly used compute functions
 pub use crate::vec::{cosine_similarity, dot_product, euclidean_distance_squared};
 
-// Column functionality
+// Column functionality and expression DSL
 pub use crate::col::*;
-pub use crate::meta::MetaStore;
-pub use crate::type_utils::*;
+pub use crate::expr::*;
+
+// Metadata store and result types
+pub use crate::meta::{MetaBuildStats, MetaQueryResults, MetaQueryStats, MetaResultRow, MetaStore};
+
+// Public data types (avoid exposing low-level SIMD wrappers)
+pub use crate::type_utils::DataType;

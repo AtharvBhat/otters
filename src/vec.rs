@@ -2,7 +2,8 @@
 //!
 //! Provides an in-memory row-major `VecStore` and a builder-style `VecQueryPlan`
 //! supporting cosine, dot product, and squared euclidean similarity with optional
-//! score filtering, local or global top-k selection, and row masking.
+//! score filtering and row masking. Batch queries are treated as a single search
+//! over multiple inputs and return one merged result set.
 use crate::vec_compute::{TopKCollector, calculate_scores_chunk_flat};
 pub use crate::vec_compute::{cosine_similarity, dot_product, euclidean_distance_squared};
 use bitvec::prelude::BitVec;
@@ -20,11 +21,6 @@ pub enum TakeType {
     Max,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum TakeScope {
-    Local,
-    Global,
-}
 
 #[derive(Debug, Clone)]
 pub enum Cmp {
@@ -35,6 +31,28 @@ pub enum Cmp {
     Eq, // Idk why you would ever use this
 }
 
+/// Rich result type for vector (and metadata) queries.
+/// Provides a stable, extensible surface instead of raw (index, score) tuples.
+/// Additional metadata fields (e.g. chunk id, original vector reference, column slices)
+/// can be added later without breaking tuple-based callers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SearchResult {
+    pub index: usize,
+    pub score: f32,
+}
+
+impl std::fmt::Display for SearchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{} score={:.6}", self.index, self.score)
+    }
+}
+
+impl From<(usize, f32)> for SearchResult {
+    fn from(t: (usize, f32)) -> Self {
+        SearchResult { index: t.0, score: t.1 }
+    }
+}
+
 #[derive(Debug)]
 pub struct VecQueryPlan<'a> {
     query_vectors: Option<Vec<Vec<f32>>>,
@@ -43,7 +61,6 @@ pub struct VecQueryPlan<'a> {
     filter_criteria: Option<(f32, Cmp)>,
     take_type: Option<TakeType>,
     take_count: Option<usize>,
-    take_scope: TakeScope,
     vector_store: Option<&'a VecStore>,
     error: Option<String>,
     row_mask: Option<BitVec>,
@@ -58,7 +75,6 @@ impl<'a> VecQueryPlan<'a> {
             filter_criteria: None,
             take_type: None,
             take_count: None,
-            take_scope: TakeScope::Local,
             vector_store: None,
             error: None,
             row_mask: None,
@@ -81,20 +97,14 @@ impl<'a> VecQueryPlan<'a> {
         }
     }
 
-    /// Generic helper powering all public `take*` variants. Determines scope, count
+    /// Generic helper powering all public `take*` variants. Determines count
     /// and (optionally) explicit `TakeType`. If `take_type` is None we infer one
     /// from the already-selected metric (if present).
-    fn take_with_options(
-        mut self,
-        count: usize,
-        scope: TakeScope,
-        take_type: Option<TakeType>,
-    ) -> Self {
+    fn take_with_options(mut self, count: usize, take_type: Option<TakeType>) -> Self {
         if self.error.is_some() {
             return self;
         }
         self.take_count = Some(count);
-        self.take_scope = scope;
         if let Some(tt) = take_type {
             self.take_type = Some(tt);
         } else if self.take_type.is_none() {
@@ -137,29 +147,11 @@ impl<'a> VecQueryPlan<'a> {
         self.map_ok(|s| s.filter_criteria = Some((score, cmp)))
     }
 
-    pub fn take(self, count: usize) -> Self {
-        self.take_with_options(count, TakeScope::Local, None)
-    }
+    pub fn take(self, count: usize) -> Self { self.take_with_options(count, None) }
 
-    pub fn take_global(self, count: usize) -> Self {
-        self.take_with_options(count, TakeScope::Global, None)
-    }
+    pub fn take_min(self, count: usize) -> Self { self.take_with_options(count, Some(TakeType::Min)) }
 
-    pub fn take_min(self, count: usize) -> Self {
-        self.take_with_options(count, TakeScope::Local, Some(TakeType::Min))
-    }
-
-    pub fn take_min_global(self, count: usize) -> Self {
-        self.take_with_options(count, TakeScope::Global, Some(TakeType::Min))
-    }
-
-    pub fn take_max(self, count: usize) -> Self {
-        self.take_with_options(count, TakeScope::Local, Some(TakeType::Max))
-    }
-
-    pub fn take_max_global(self, count: usize) -> Self {
-        self.take_with_options(count, TakeScope::Global, Some(TakeType::Max))
-    }
+    pub fn take_max(self, count: usize) -> Self { self.take_with_options(count, Some(TakeType::Max)) }
 
     fn validate(&self) -> Result<(), String> {
         if let Some(ref error) = self.error {
@@ -196,7 +188,7 @@ impl<'a> VecQueryPlan<'a> {
         Ok(())
     }
 
-    pub fn collect(self) -> Result<Vec<Vec<(usize, f32)>>, String> {
+    pub fn collect(self) -> Result<Vec<SearchResult>, String> {
         self.validate()?;
 
         let vector_store = self.vector_store.unwrap();
@@ -205,19 +197,10 @@ impl<'a> VecQueryPlan<'a> {
         let search_metric = self.search_metric.as_ref().unwrap();
         let take_count = self.take_count.unwrap_or(vector_store.n_vecs);
         let take_type = self.take_type.as_ref().unwrap_or(&TakeType::Max);
-        let num_queries = query_vectors.len();
+        let _num_queries = query_vectors.len();
 
-        // Initialize collectors
-        let mut collectors: Vec<TopKCollector> = match self.take_scope {
-            TakeScope::Global => vec![TopKCollector::new(
-                take_count,
-                take_type,
-                self.filter_criteria.as_ref(),
-            )],
-            TakeScope::Local => (0..num_queries)
-                .map(|_| TopKCollector::new(take_count, take_type, self.filter_criteria.as_ref()))
-                .collect(),
-        };
+        // Single global collector aggregating across all queries
+        let mut collector = TopKCollector::new(take_count, take_type, self.filter_criteria.as_ref());
 
         // Process chunks: 8 rows per block
         let full_chunks = vector_store.n_vecs / 8;
@@ -244,21 +227,10 @@ impl<'a> VecQueryPlan<'a> {
                     m
                 };
 
-                match self.take_scope {
-                    TakeScope::Global => scores_per_query.into_iter().for_each(|scores| {
-                        let bm = self.row_mask.as_ref().map(block_mask);
-                        collectors[0].push_chunk_masked(chunk_idx, scores, bm);
-                    }),
-                    TakeScope::Local => {
-                        scores_per_query
-                            .into_iter()
-                            .enumerate()
-                            .for_each(|(q_idx, scores)| {
-                                let bm = self.row_mask.as_ref().map(block_mask);
-                                collectors[q_idx].push_chunk_masked(chunk_idx, scores, bm);
-                            })
-                    }
-                }
+                scores_per_query.into_iter().for_each(|scores| {
+                    let bm = self.row_mask.as_ref().map(block_mask);
+                    collector.push_chunk_masked(chunk_idx, scores, bm);
+                });
             });
 
         // Process remainder
@@ -269,8 +241,7 @@ impl<'a> VecQueryPlan<'a> {
             query_vectors
                 .iter()
                 .zip(query_vectors_inv_norms.iter())
-                .enumerate()
-                .for_each(|(q_idx, (query, &query_inv_norm))| {
+                .for_each(|(query, &query_inv_norm)| {
                     let scores = remainder_inv_norms
                         .iter()
                         .enumerate()
@@ -294,18 +265,18 @@ impl<'a> VecQueryPlan<'a> {
                                 .unwrap_or(true)
                         })
                         .collect();
-                    match self.take_scope {
-                        TakeScope::Global => collectors[0].push_scalars(scores),
-                        TakeScope::Local => collectors[q_idx].push_scalars(scores),
-                    }
+                    collector.push_scalars(scores);
                 });
         }
 
         // Return results
-        Ok(collectors
-            .into_iter()
-            .map(|c| c.into_sorted_vec())
-            .collect())
+        Ok(
+            collector
+                .into_sorted_vec()
+                .into_iter()
+                .map(SearchResult::from)
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -417,7 +388,7 @@ impl VecStore {
             filter_criteria: None,
             take_type: None,
             take_count: None,
-            take_scope: TakeScope::Local,
+            
             vector_store: Some(self),
             error: None,
             row_mask: None,

@@ -11,23 +11,48 @@ use std::time::{Duration, Instant};
 use crate::{
     col::{self, Column},
     expr::{CmpOp, ColumnFilter, CompiledFilter, Expr, NumericLiteral},
-    meta_compute::{ZoneStat, build_zone_stat_for_range},
-    type_utils::{
-        DataType, apply_rows_mask_f32, apply_rows_mask_f64, apply_rows_mask_i32,
-        apply_rows_mask_i64,
+    meta_compute::{
+        BloomBuild, ChunkAgg, MetaChunk, ZoneStat, build_zone_stat_for_range, process_chunk,
     },
-    vec::{Cmp as VecCmp, Metric, TakeScope, TakeType, VecStore},
+    type_utils::DataType,
+    vec::{Cmp as VecCmp, Metric, TakeType, VecStore},
 };
 use bitvec::bitvec;
 use bitvec::prelude::BitVec;
 use rayon::prelude::*;
+use chrono::DateTime;
 
-#[derive(Debug)]
-struct MetaChunk {
-    base_offset: usize,
-    len: usize,
-    vec_store: VecStore,
-    stats: HashMap<String, ZoneStat>,
+// ASCII table rendering moved to crate::display
+
+/// One row of a MetaStore search result, including index, score and column values.
+#[derive(Clone)]
+pub struct MetaResultRow {
+    pub index: usize,
+    pub score: f32,
+    pub entries: HashMap<String, String>,
+}
+
+// Debug/Display impls for MetaResultRow are not required externally; keep derived Debug via struct fmt
+
+/// Meta query results wrapper; pretty Display output is in display.rs
+#[derive(Clone)]
+pub struct MetaQueryResults {
+    pub columns: Vec<String>, // stable, sorted column order
+    pub rows: Vec<MetaResultRow>,
+}
+
+impl MetaQueryResults {
+    pub fn len(&self) -> usize { self.rows.len() }
+    pub fn is_empty(&self) -> bool { self.rows.is_empty() }
+}
+
+// MetaChunk moved to meta_compute.rs
+
+#[derive(Debug, Clone, Copy)]
+pub enum BloomConfig {
+    Fpr(f64),
+    // Total number of bits for the Bloom filter backing store
+    Bits(usize),
 }
 
 #[derive(Debug)]
@@ -38,8 +63,6 @@ pub struct MetaStore {
     chunks: Vec<MetaChunk>,
     last_stats: std::cell::RefCell<Option<MetaQueryStats>>,
     build_stats: Option<MetaBuildStats>,
-    // Tightly packed per-chunk ranges to enable SIMD-friendly zonemap filtering.
-    // Generic form reduces boilerplate between numeric types.
     packed_ranges_f64: HashMap<String, PackedRanges<f64>>,
     packed_ranges_i64: HashMap<String, PackedRanges<i64>>,
     packed_ranges_f32: HashMap<String, PackedRanges<f32>>,
@@ -52,6 +75,7 @@ pub struct MetaStoreBuilder {
     columns: HashMap<String, Column>,
     vectors: Option<Vec<Vec<f32>>>,
     chunk_size: usize,
+    bloom: BloomConfig,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -72,9 +96,20 @@ impl MetaStoreBuilder {
         self
     }
 
-    // Backward-compatible alias
-    pub fn with_chunks(self, chunk_size: usize) -> Self {
-        self.with_chunk_size(chunk_size)
+    /// Configure bloom filter by target false-positive rate (0 < fpr < 1).
+    pub fn with_bloom_fpr(mut self, fpr: f64) -> Self {
+        // Clamp to sane bounds, fallback to default when non-finite
+        let f = if fpr.is_finite() { fpr.clamp(1e-12, 0.5) } else { 0.01 };
+        self.bloom = BloomConfig::Fpr(f);
+        self
+    }
+
+    /// Configure bloom filter by total number of bits.
+    /// Use this to size the filter explicitly (e.g. 1024, 4096, ...).
+    pub fn with_bloom_bits(mut self, bits: usize) -> Self {
+        let b = bits.max(64); // minimal sane floor
+        self.bloom = BloomConfig::Bits(b);
+        self
     }
 
     // Supply a single fully-built column for a name from the schema
@@ -199,7 +234,11 @@ impl MetaStoreBuilder {
                     .columns
                     .get(name)
                     .ok_or_else(|| format!("missing column '{name}' in builder columns"))?;
-                let stat = build_zone_stat_for_range(col, *dtype, base_offset, end)?;
+                let bloom_cfg = match self.bloom {
+                    BloomConfig::Fpr(p) => BloomBuild::Fpr(p),
+                    BloomConfig::Bits(b) => BloomBuild::Bits(b),
+                };
+                let stat = build_zone_stat_for_range(col, *dtype, base_offset, end, bloom_cfg)?;
                 stats.insert(name.clone(), stat);
             }
             zonemap_build_duration += zstart.elapsed();
@@ -208,7 +247,6 @@ impl MetaStoreBuilder {
             for (name, dtype) in &self.schema {
                 match (dtype, stats.get(name).unwrap()) {
                     (DataType::Float32, ZoneStat::Float { min, max, non_null }) => {
-                        // Use only f32 packed ranges for f32 columns
                         let e32 = packed_ranges_f32.entry(name.clone()).or_default();
                         e32.min.push(*min as f32);
                         e32.max.push(*max as f32);
@@ -221,7 +259,6 @@ impl MetaStoreBuilder {
                         entry.non_null.push(*non_null);
                     }
                     (DataType::Int32, ZoneStat::Int { min, max, non_null }) => {
-                        // Use only i32 packed ranges for i32 columns
                         let e32 = packed_ranges_i32.entry(name.clone()).or_default();
                         e32.min.push(*min as i32);
                         e32.max.push(*max as i32);
@@ -306,17 +343,24 @@ impl MetaStore {
         }
     }
 
-    /// Start a builder using a provided schema and fully-populated columns.
-    /// Prefer `from_columns`.
-    pub fn builder_from_columns(columns: Vec<(String, Column)>) -> MetaStoreBuilder {
+    /// Start a builder using fully-populated columns.
+    ///
+    /// Column names and dtypes are inferred directly from each `Column`.
+    /// If duplicate names are provided, the last one wins.
+    /// Prefer `from_columns` for the most ergonomic construction.
+    pub fn builder_from_columns(columns: Vec<Column>) -> MetaStoreBuilder {
         Self::from_columns(columns)
     }
 
-    /// Start a builder using a provided schema and fully-populated columns.
-    pub fn from_columns(columns: Vec<(String, Column)>) -> MetaStoreBuilder {
+    /// Start a builder using fully-populated columns.
+    ///
+    /// Column names and dtypes are inferred directly from each `Column`.
+    /// If duplicate names are provided, the last one wins.
+    pub fn from_columns(columns: Vec<Column>) -> MetaStoreBuilder {
         let mut schema = HashMap::new();
         let mut col_map = HashMap::new();
-        for (name, col) in columns {
+        for col in columns {
+            let name = col.name().to_string();
             schema.insert(name.clone(), col.dtype());
             col_map.insert(name, col);
         }
@@ -325,6 +369,7 @@ impl MetaStore {
             columns: col_map,
             vectors: None,
             chunk_size: 1024,
+            bloom: BloomConfig::Fpr(0.01),
         }
     }
 
@@ -341,27 +386,29 @@ impl MetaStore {
             columns,
             vectors: None,
             chunk_size: 1024,
+            bloom: BloomConfig::Fpr(0.01),
         }
     }
 
-    pub fn head(&self) {
-        println!("MetaStore:");
-        println!("Schema:");
-        for (name, dtype) in &self.schema {
-            println!(" - {name}: {dtype:?}");
-        }
-        for col in self.columns.values() {
-            col.head();
-        }
-        println!(
-            "Chunks: {} (chunk_size: {})",
-            self.chunks.len(),
-            self.chunk_size
-        );
+    pub fn head(&self) { self.head_n(5) }
+
+    pub fn head_n(&self, n: usize) {
+        println!("{}", crate::display::metastore_head(self, n));
     }
+
+    // Accessors for display helpers
+    pub fn schema(&self) -> &HashMap<String, DataType> { &self.schema }
+    pub fn columns(&self) -> &HashMap<String, Column> { &self.columns }
+    pub fn n_chunks(&self) -> usize { self.chunks.len() }
+    pub fn chunk_size(&self) -> usize { self.chunk_size }
 
     pub fn last_query_stats(&self) -> Option<MetaQueryStats> {
         self.last_stats.borrow().clone()
+    }
+
+    /// Return build-time stats captured when the MetaStore was constructed.
+    pub fn build_stats(&self) -> Option<MetaBuildStats> {
+        self.build_stats.clone()
     }
 
     // Build a per-chunk mask for the compiled plan using packed ranges and SIMD, mirroring
@@ -505,45 +552,26 @@ impl MetaStore {
         }
     }
 
-    pub fn print_last_stats(&self) {
-        println!("-- MetaStore Build Stats --");
+    /// Print only build stats as an ASCII table.
+    pub fn print_build_stats(&self) {
         match &self.build_stats {
-            Some(b) => {
-                println!(
-                    "Rows: {}, Dimensions: {}, Chunks: {}",
-                    b.n_rows, b.dim, b.n_chunks
-                );
-                println!(
-                    "Vector Ingest: {:.3} ms | Zone Map Build: {:.3} ms | Build Total: {:.3} ms",
-                    b.vectors_ingest_duration.as_secs_f64() * 1000.0,
-                    b.zonemap_build_duration.as_secs_f64() * 1000.0,
-                    b.build_total_duration.as_secs_f64() * 1000.0
-                );
-            }
+            Some(b) => println!("{}", crate::display::format_build_stats(b)),
             None => println!("(no build stats)"),
         }
+    }
 
-        println!("-- Last Meta Query Stats --");
+    /// Print only the last query stats as an ASCII table.
+    pub fn print_last_query_stats(&self) {
         match self.last_query_stats() {
-            Some(s) => {
-                println!(
-                    "Chunks: total={} | pruned={} | evaluated={}",
-                    s.total_chunks, s.pruned_chunks, s.evaluated_chunks
-                );
-                println!(
-                    "Vector Comparisons: {} | Candidates before meta filter: {} | After meta filter: {}",
-                    s.vectors_compared, s.results_before_postfilter, s.results_after_postfilter
-                );
-                println!(
-                    "Timing: prune={:.3} ms | score={:.3} ms | merge={:.3} ms | total={:.3} ms",
-                    s.prune_duration.as_secs_f64() * 1000.0,
-                    s.score_duration.as_secs_f64() * 1000.0,
-                    s.merge_duration.as_secs_f64() * 1000.0,
-                    s.total_duration.as_secs_f64() * 1000.0
-                );
-            }
+            Some(s) => println!("{}", crate::display::format_query_stats(&s)),
             None => println!("(no query stats)"),
         }
+    }
+
+    /// Backwards-compatible combined stats printer (build + last query)
+    pub fn print_last_stats(&self) {
+        self.print_build_stats();
+        self.print_last_query_stats();
     }
 
     /// Begin a query plan over this MetaStore with a single query vector
@@ -568,212 +596,10 @@ pub struct MetaQueryPlan<'a> {
     vec_filter: Option<(f32, VecCmp)>,
     take_type: Option<TakeType>,
     take_count: Option<usize>,
-    take_scope: TakeScope,
-    capture_stats: bool,
+    // stats are always captured now
 }
 
-// Internal aggregation bucket for per-chunk processing
-#[derive(Default)]
-struct ChunkAgg {
-    results: Vec<Vec<(usize, f32)>>,
-    before: usize,
-    after: usize,
-    compared: usize,
-}
-
-// Process a single chunk: run per-chunk VecStore query, apply optional row-level meta filter,
-// and collect results and counters. This function is thread-safe and does not capture &self.
-#[allow(clippy::too_many_arguments)]
-fn process_chunk(
-    chunk: &MetaChunk,
-    take_scope: &TakeScope,
-    metric: &Metric,
-    queries: &[Vec<f32>],
-    vec_filter: Option<(f32, VecCmp)>,
-    meta_filter: Option<&CompiledFilter>,
-    columns: &HashMap<String, Column>,
-    k: usize,
-    n_queries: usize,
-) -> ChunkAgg {
-    let mut agg = ChunkAgg {
-        results: match *take_scope {
-            TakeScope::Local => vec![Vec::new(); n_queries],
-            TakeScope::Global => vec![Vec::new()],
-        },
-        before: 0,
-        after: 0,
-        compared: chunk.len * n_queries,
-    };
-
-    // Build SIMD row mask if meta filter present
-    let row_mask_opt: Option<BitVec> =
-        meta_filter.map(|cf| build_row_mask_for_chunk(cf, columns, chunk.base_offset, chunk.len));
-
-    let metric2 = *metric;
-    let mut plan = chunk.vec_store.query(queries.to_owned(), metric2);
-    if let Some((thr, cmp)) = &vec_filter {
-        plan = plan.filter(*thr, cmp.clone());
-    }
-    if let Some(rm) = row_mask_opt.clone() {
-        plan = plan.with_row_mask(rm);
-    }
-    plan = match *take_scope {
-        TakeScope::Local => plan.take(k),
-        TakeScope::Global => plan.take(k),
-    };
-
-    if let Ok(mut results) = plan.collect() {
-        match *take_scope {
-            TakeScope::Local => {
-                for (q_idx, vecs) in results.iter_mut().enumerate() {
-                    agg.before += vecs.len();
-                    for (idx, score) in vecs.drain(..) {
-                        let global_idx = chunk.base_offset + idx;
-                        agg.results[q_idx].push((global_idx, score));
-                        agg.after += 1;
-                    }
-                }
-            }
-            TakeScope::Global => {
-                let vecs = results.remove(0);
-                agg.before += vecs.len();
-                for (idx, score) in vecs.into_iter() {
-                    let global_idx = chunk.base_offset + idx;
-                    agg.results[0].push((global_idx, score));
-                    agg.after += 1;
-                }
-            }
-        }
-    }
-
-    agg
-}
-
-fn build_row_mask_for_chunk(
-    compiled: &CompiledFilter,
-    columns: &HashMap<String, Column>,
-    base: usize,
-    len: usize,
-) -> BitVec {
-    let mut candidates = bitvec![1; len];
-    for clause in &compiled.clauses {
-        let mut clause_mask = bitvec![0; len];
-        for leaf in clause {
-            match leaf {
-                ColumnFilter::Numeric { column, cmp, rhs } => {
-                    apply_numeric_leaf_row_mask(
-                        columns,
-                        base,
-                        len,
-                        column,
-                        *cmp,
-                        rhs,
-                        &mut clause_mask,
-                    );
-                }
-                ColumnFilter::String { column, cmp, rhs } => {
-                    apply_string_leaf_row_mask(
-                        columns,
-                        base,
-                        len,
-                        column,
-                        *cmp,
-                        rhs,
-                        &mut clause_mask,
-                    );
-                }
-            }
-        }
-        candidates &= clause_mask;
-    }
-    candidates
-}
-
-// Leaf helpers for row mask
-fn apply_numeric_leaf_row_mask(
-    columns: &HashMap<String, Column>,
-    base: usize,
-    len: usize,
-    column: &str,
-    cmp: CmpOp,
-    rhs: &NumericLiteral,
-    clause_mask: &mut BitVec,
-) {
-    if let Some(col) = columns.get(column) {
-        match col.dtype() {
-            DataType::Float32 => {
-                let vals = col.f32_values().unwrap();
-                let nulls = col.null_mask();
-                let thr = match rhs {
-                    NumericLiteral::F64(v) => *v as f32,
-                    NumericLiteral::I64(v) => *v as f32,
-                };
-                apply_rows_mask_f32(vals, nulls, base, len, cmp, thr, clause_mask);
-            }
-            DataType::Int32 => {
-                let vals = col.i32_values().unwrap();
-                let nulls = col.null_mask();
-                let thr = match rhs {
-                    NumericLiteral::I64(v) => *v as i32,
-                    NumericLiteral::F64(v) => *v as i32,
-                };
-                apply_rows_mask_i32(vals, nulls, base, len, cmp, thr, clause_mask);
-            }
-            DataType::Float64 => {
-                let vals = col.f64_values().unwrap();
-                let nulls = col.null_mask();
-                let thr = match rhs {
-                    NumericLiteral::F64(v) => *v,
-                    NumericLiteral::I64(v) => *v as f64,
-                };
-                apply_rows_mask_f64(vals, nulls, base, len, cmp, thr, clause_mask);
-            }
-            DataType::Int64 | DataType::DateTime => {
-                let vals = if col.dtype() == DataType::Int64 {
-                    col.i64_values().unwrap()
-                } else {
-                    col.datetime_values().unwrap()
-                };
-                let nulls = col.null_mask();
-                let thr = match rhs {
-                    NumericLiteral::I64(v) => *v,
-                    NumericLiteral::F64(v) => *v as i64,
-                };
-                apply_rows_mask_i64(vals, nulls, base, len, cmp, thr, clause_mask);
-            }
-            DataType::String => {}
-        }
-    }
-}
-
-fn apply_string_leaf_row_mask(
-    columns: &HashMap<String, Column>,
-    base: usize,
-    len: usize,
-    column: &str,
-    cmp: CmpOp,
-    rhs: &str,
-    clause_mask: &mut BitVec,
-) {
-    if let Some(col) = columns.get(column) {
-        let vals = col.string_values().unwrap();
-        let nulls = col.null_mask();
-        for off in 0..len {
-            if nulls.get(base + off).map(|b| *b).unwrap_or(false) {
-                continue;
-            }
-            let v = &vals[base + off];
-            let sat = match cmp {
-                CmpOp::Eq => v == rhs,
-                CmpOp::Neq => v != rhs,
-                _ => false,
-            };
-            if sat {
-                clause_mask.set(off, true);
-            }
-        }
-    }
-}
+// compute helpers moved to meta_compute.rs
 
 impl<'a> MetaQueryPlan<'a> {
     fn new(store: &'a MetaStore, queries: Vec<Vec<f32>>, metric: Metric) -> Self {
@@ -785,8 +611,6 @@ impl<'a> MetaQueryPlan<'a> {
             vec_filter: None,
             take_type: None,
             take_count: None,
-            take_scope: TakeScope::Local,
-            capture_stats: false,
         }
     }
 
@@ -812,29 +636,12 @@ impl<'a> MetaQueryPlan<'a> {
         self
     }
 
-    pub fn take_global(mut self, k: usize) -> Self {
-        self.take_count = Some(k);
-        self.take_scope = TakeScope::Global;
-        self.take_type = Some(match self.metric {
-            Metric::Euclidean => TakeType::Min,
-            Metric::Cosine | Metric::DotProduct => TakeType::Max,
-        });
-        self
-    }
-
-    pub fn with_stats(mut self) -> Self {
-        self.capture_stats = true;
-        self
-    }
+    // take_global removed; single merged result is always returned
 
     // parallel is always on; no with_parallel needed
 
-    pub fn collect(self) -> Result<Vec<Vec<(usize, f32)>>, String> {
-        let total_start = if self.capture_stats {
-            Some(Instant::now())
-        } else {
-            None
-        };
+    pub fn collect(self) -> Result<MetaQueryResults, String> {
+        let total_start = Instant::now();
         let k = self.take_count.unwrap_or_else(|| {
             // default: number of rows across store
             self.store.chunks.iter().map(|c| c.len).sum()
@@ -845,11 +652,7 @@ impl<'a> MetaQueryPlan<'a> {
         });
 
         // Preselect chunks via zone stats
-        let prune_start = if self.capture_stats {
-            Some(Instant::now())
-        } else {
-            None
-        };
+        let prune_start = Instant::now();
         let candidate_chunks: Vec<&MetaChunk> = match self.meta_filter.as_ref() {
             Some(compiled) => self
                 .store
@@ -862,30 +665,20 @@ impl<'a> MetaQueryPlan<'a> {
                 .collect(),
             None => self.store.chunks.iter().collect(),
         };
-        let prune_duration = prune_start.map(|t| t.elapsed()).unwrap_or_default();
+        let prune_duration = prune_start.elapsed();
 
-        // Aggregated results per-query (or single vector for global)
-        let n_queries = self.queries.len();
-        let mut aggregated: Vec<Vec<(usize, f32)>> = match self.take_scope {
-            TakeScope::Local => vec![Vec::new(); n_queries],
-            TakeScope::Global => vec![Vec::new()],
-        };
+        // Aggregated results into a single list across all queries
+        let mut aggregated: Vec<(usize, f32)> = Vec::new();
 
         // Stats counters
         let total_chunks = self.store.chunks.len();
         let evaluated_chunks = candidate_chunks.len();
         let pruned_chunks = total_chunks - evaluated_chunks;
         let mut vectors_compared: usize = 0;
-        let mut results_before_postfilter: usize = 0;
-        let mut results_after_postfilter: usize = 0;
+        // No separate pre/post row counters because filtering is pushed down
 
-        let score_start = if self.capture_stats {
-            Some(Instant::now())
-        } else {
-            None
-        };
+        let score_start = Instant::now();
         // Extract inputs once
-        let take_scope = self.take_scope;
         let metric_ref = &self.metric;
         let queries_ref = &self.queries;
         let vec_filter_opt = self.vec_filter.clone();
@@ -897,72 +690,85 @@ impl<'a> MetaQueryPlan<'a> {
             .map(|c| {
                 process_chunk(
                     c,
-                    &take_scope,
                     metric_ref,
                     queries_ref,
                     vec_filter_opt.clone(),
                     meta_filter_ref,
                     columns_ref,
                     k,
-                    n_queries,
                 )
             })
             .collect();
 
         for agg in per_chunk {
-            if self.capture_stats {
-                vectors_compared += agg.compared;
-                results_before_postfilter += agg.before;
-                results_after_postfilter += agg.after;
-            }
-            match take_scope {
-                TakeScope::Local => {
-                    for (q_idx, mut v) in agg.results.into_iter().enumerate() {
-                        aggregated[q_idx].append(&mut v);
+            vectors_compared += agg.compared;
+            aggregated.extend(agg.results.into_iter());
+        }
+        let score_duration = score_start.elapsed();
+
+        let merge_start = Instant::now();
+        // Final top-k per bucket
+        // sort and truncate final list
+        match take_type {
+            TakeType::Min => aggregated.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap()),
+            TakeType::Max => aggregated.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap()),
+        }
+        if aggregated.len() > k {
+            aggregated.truncate(k);
+        }
+        let merge_duration = merge_start.elapsed();
+        let total_duration = total_start.elapsed();
+        let stats = MetaQueryStats {
+            total_chunks,
+            pruned_chunks,
+            evaluated_chunks,
+            vectors_compared,
+            prune_duration,
+            score_duration,
+            merge_duration,
+            total_duration,
+        };
+        *self.store.last_stats.borrow_mut() = Some(stats);
+        // Build rich result rows with metadata entries for each index
+        let mut col_names: Vec<String> = self.store.schema.keys().cloned().collect();
+        col_names.sort();
+
+        let mut rows: Vec<MetaResultRow> = Vec::with_capacity(aggregated.len());
+        for (idx, score) in aggregated.iter().cloned() {
+            let mut entries: HashMap<String, String> = HashMap::with_capacity(col_names.len());
+            for name in &col_names {
+                if let Some(col) = self.store.columns.get(name) {
+                    let is_null = col
+                        .null_mask()
+                        .get(idx)
+                        .map(|b| *b)
+                        .unwrap_or(false);
+                    if is_null {
+                        entries.insert(name.clone(), "NULL".to_string());
+                    } else {
+                        let cell = match col.dtype() {
+                            DataType::Int32 => col.i32_values().map(|v| v[idx].to_string()).unwrap(),
+                            DataType::Int64 => col.i64_values().map(|v| v[idx].to_string()).unwrap(),
+                            DataType::Float32 => col.f32_values().map(|v| format!("{:.4}", v[idx])).unwrap(),
+                            DataType::Float64 => col.f64_values().map(|v| format!("{:.4}", v[idx])).unwrap(),
+                            DataType::String => col.string_values().map(|v| v[idx].clone()).unwrap(),
+                            DataType::DateTime => col
+                                .datetime_values()
+                                .map(|v| {
+                                    DateTime::from_timestamp_millis(v[idx])
+                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                                        .unwrap_or_else(|| format!("{}", v[idx]))
+                                })
+                                .unwrap(),
+                        };
+                        entries.insert(name.clone(), cell);
                     }
                 }
-                TakeScope::Global => {
-                    let mut v = agg.results.into_iter().next().unwrap();
-                    aggregated[0].append(&mut v);
-                }
             }
+            rows.push(MetaResultRow { index: idx, score, entries });
         }
-        let score_duration = score_start.map(|t| t.elapsed()).unwrap_or_default();
 
-        let merge_start = if self.capture_stats {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        // Final top-k per bucket
-        for bucket in aggregated.iter_mut() {
-            // sort and truncate by take_type
-            match take_type {
-                TakeType::Min => bucket.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap()),
-                TakeType::Max => bucket.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap()),
-            }
-            if bucket.len() > k {
-                bucket.truncate(k);
-            }
-        }
-        if self.capture_stats {
-            let merge_duration = merge_start.map(|t| t.elapsed()).unwrap_or_default();
-            let total_duration = total_start.map(|t| t.elapsed()).unwrap_or_default();
-            let stats = MetaQueryStats {
-                total_chunks,
-                pruned_chunks,
-                evaluated_chunks,
-                vectors_compared,
-                results_before_postfilter,
-                results_after_postfilter,
-                prune_duration,
-                score_duration,
-                merge_duration,
-                total_duration,
-            };
-            *self.store.last_stats.borrow_mut() = Some(stats);
-        }
-        Ok(aggregated)
+        Ok(MetaQueryResults { columns: col_names, rows })
     }
 }
 
@@ -972,8 +778,6 @@ pub struct MetaQueryStats {
     pub pruned_chunks: usize,
     pub evaluated_chunks: usize,
     pub vectors_compared: usize,
-    pub results_before_postfilter: usize,
-    pub results_after_postfilter: usize,
     pub prune_duration: Duration,
     pub score_duration: Duration,
     pub merge_duration: Duration,

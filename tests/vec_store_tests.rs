@@ -118,11 +118,10 @@ fn test_successful_chain_after_valid_query() {
 
     assert!(result.is_ok());
     let results = result.unwrap();
-    assert_eq!(results.len(), 1); // One query
 
     // Should only include vectors with similarity > 0.5
-    for (_, similarity) in &results[0] {
-        assert!(*similarity > 0.5);
+    for r in &results {
+        assert!(r.score > 0.5);
     }
 }
 
@@ -164,12 +163,11 @@ fn test_cosine_similarity_basic() {
         .unwrap();
 
     // Should return results for the single query
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 5); // All 5 vectors
+    assert_eq!(results.len(), 5); // All 5 vectors
 
     // Check that the similarity with itself is approximately 1.0
-    let self_similarity = results[0].iter().find(|(idx, _)| *idx == 0).unwrap();
-    assert!((self_similarity.1 - 1.0).abs() < 1e-6);
+    let self_similarity = results.iter().find(|r| r.index == 0).unwrap();
+    assert!((self_similarity.score - 1.0).abs() < 1e-6);
 }
 
 #[test]
@@ -187,18 +185,17 @@ fn test_cosine_orthogonal_vectors() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 2);
+    assert_eq!(results.len(), 2);
 
     // Find the parallel and orthogonal vectors
-    let parallel = results[0].iter().find(|(idx, _)| *idx == 0).unwrap();
-    let orthogonal = results[0].iter().find(|(idx, _)| *idx == 1).unwrap();
+    let parallel = results.iter().find(|r| r.index == 0).unwrap();
+    let orthogonal = results.iter().find(|r| r.index == 1).unwrap();
 
     // Parallel vector should have similarity 1.0
-    assert!((parallel.1 - 1.0).abs() < 1e-6);
+    assert!((parallel.score - 1.0).abs() < 1e-6);
 
     // Orthogonal vector should have similarity 0.0
-    assert!(orthogonal.1.abs() < 1e-6);
+    assert!(orthogonal.score.abs() < 1e-6);
 }
 
 // ============================================================================
@@ -220,11 +217,9 @@ fn test_euclidean_distance_basic() {
         .unwrap();
 
     // Should return results for the single query
-    assert_eq!(results.len(), 1);
-
     // Check that the distance with itself is approximately 0.0
-    let self_distance = results[0].iter().find(|(idx, _)| *idx == 0).unwrap();
-    assert!(self_distance.1.abs() < 1e-6);
+    let self_distance = results.iter().find(|r| r.index == 0).unwrap();
+    assert!(self_distance.score.abs() < 1e-6);
 }
 
 // ============================================================================
@@ -246,11 +241,9 @@ fn test_dot_product_basic() {
         .unwrap();
 
     // Should return results for the single query
-    assert_eq!(results.len(), 1);
-
     // Check that the dot product with itself is 1.0 (since query vector has norm 1)
-    let self_dot_product = results[0].iter().find(|(idx, _)| *idx == 0).unwrap();
-    assert!((self_dot_product.1 - 1.0).abs() < 1e-6);
+    let self_dot_product = results.iter().find(|r| r.index == 0).unwrap();
+    assert!((self_dot_product.score - 1.0).abs() < 1e-6);
 }
 
 #[test]
@@ -270,26 +263,25 @@ fn test_dot_product_orthogonal_vectors() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 4);
+    assert_eq!(results.len(), 4);
 
     // Find specific vectors and their dot products
-    let identical = results[0].iter().find(|(idx, _)| *idx == 0).unwrap();
-    let orthogonal = results[0].iter().find(|(idx, _)| *idx == 1).unwrap();
-    let scaled = results[0].iter().find(|(idx, _)| *idx == 2).unwrap();
-    let opposite = results[0].iter().find(|(idx, _)| *idx == 3).unwrap();
+    let identical = results.iter().find(|r| r.index == 0).unwrap();
+    let orthogonal = results.iter().find(|r| r.index == 1).unwrap();
+    let scaled = results.iter().find(|r| r.index == 2).unwrap();
+    let opposite = results.iter().find(|r| r.index == 3).unwrap();
 
     // Identical vector should have dot product 1.0
-    assert!((identical.1 - 1.0).abs() < 1e-6);
+    assert!((identical.score - 1.0).abs() < 1e-6);
 
     // Orthogonal vector should have dot product 0.0
-    assert!(orthogonal.1.abs() < 1e-6);
+    assert!(orthogonal.score.abs() < 1e-6);
 
     // Scaled parallel vector should have dot product 2.0
-    assert!((scaled.1 - 2.0).abs() < 1e-6);
+    assert!((scaled.score - 2.0).abs() < 1e-6);
 
     // Opposite vector should have dot product -1.0
-    assert!((opposite.1 - (-1.0)).abs() < 1e-6);
+    assert!((opposite.score - (-1.0)).abs() < 1e-6);
 }
 
 #[test]
@@ -309,17 +301,16 @@ fn test_dot_product_ranking() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 4);
+    assert_eq!(results.len(), 4);
 
     // Results should be sorted by dot product (highest first)
-    assert!(results[0][0].1 >= results[0][1].1);
-    assert!(results[0][1].1 >= results[0][2].1);
-    assert!(results[0][2].1 >= results[0][3].1);
+    assert!(results[0].score >= results[1].score);
+    assert!(results[1].score >= results[2].score);
+    assert!(results[2].score >= results[3].score);
 
     // Check specific dot product values
-    assert!((results[0][0].1 - 25.0).abs() < 1e-6); // highest dot product
-    assert!((results[0][3].1 - (-3.0)).abs() < 1e-6); // lowest dot product
+    assert!((results[0].score - 25.0).abs() < 1e-6); // highest dot product
+    assert!((results[3].score - (-3.0)).abs() < 1e-6); // lowest dot product
 }
 
 #[test]
@@ -342,16 +333,14 @@ fn test_dot_product_filtering() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1); // Single query
-
     // Should only return vectors with dot product > 1.0
-    for (_, dot_product) in &results[0] {
-        assert!(*dot_product > 1.0);
+    for r in &results {
+        assert!(r.score > 1.0);
     }
 
     // Should return only one vector (the one with dot product 2.0)
-    assert_eq!(results[0].len(), 1);
-    assert!((results[0][0].1 - 2.0).abs() < 1e-6);
+    assert_eq!(results.len(), 1);
+    assert!((results[0].score - 2.0).abs() < 1e-6);
 }
 
 #[test]
@@ -373,12 +362,11 @@ fn test_dot_product_take_max() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 2);
+    assert_eq!(results.len(), 2);
 
     // Should return the 2 highest dot products (2.0 and 1.0)
-    assert!((results[0][0].1 - 2.0).abs() < 1e-6);
-    assert!((results[0][1].1 - 1.0).abs() < 1e-6);
+    assert!((results[0].score - 2.0).abs() < 1e-6);
+    assert!((results[1].score - 1.0).abs() < 1e-6);
 }
 
 #[test]
@@ -400,12 +388,11 @@ fn test_dot_product_take_min() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 2);
+    assert_eq!(results.len(), 2);
 
     // Should return the 2 lowest dot products (-1.0 and 0.5)
-    assert!((results[0][0].1 - (-1.0)).abs() < 1e-6);
-    assert!((results[0][1].1 - 0.5).abs() < 1e-6);
+    assert!((results[0].score - (-1.0)).abs() < 1e-6);
+    assert!((results[1].score - 0.5).abs() < 1e-6);
 }
 
 #[test]
@@ -428,18 +415,8 @@ fn test_dot_product_batch_queries() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 2); // Two queries
-
-    // Each query should return 2 results
-    for query_results in &results {
-        assert_eq!(query_results.len(), 2);
-    }
-
-    // First query should have highest dot product with first vector (1.0)
-    assert!((results[0][0].1 - 1.0).abs() < 1e-6);
-
-    // Second query should have highest dot product with second vector (1.0)
-    assert!((results[1][0].1 - 1.0).abs() < 1e-6);
+    // Batch queries return a single merged result of size 2
+    assert_eq!(results.len(), 2);
 }
 
 // ============================================================================
@@ -465,11 +442,10 @@ fn test_top_k_cosine() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1); // Single query
-    assert_eq!(results[0].len(), 2); // Top 2 results
+    assert_eq!(results.len(), 2); // Top 2 results
 
     // Results should be sorted by similarity (highest first for cosine)
-    assert!(results[0][0].1 >= results[0][1].1);
+    assert!(results[0].score >= results[1].score);
 }
 
 #[test]
@@ -491,11 +467,10 @@ fn test_top_k_euclidean() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1); // Single query
-    assert_eq!(results[0].len(), 2); // Top 2 closest results
+    assert_eq!(results.len(), 2); // Top 2 closest results
 
     // Results should be sorted by distance (smallest first for closest)
-    assert!(results[0][0].1 <= results[0][1].1);
+    assert!(results[0].score <= results[1].score);
 }
 
 #[test]
@@ -515,8 +490,7 @@ fn test_take_more_than_available() {
         .unwrap();
 
     // Should return all available results (2)
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 2);
+    assert_eq!(results.len(), 2);
 }
 
 #[test]
@@ -534,8 +508,7 @@ fn test_take_zero_results() {
         .unwrap();
 
     // Should return empty results when k=0
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 0);
+    assert_eq!(results.len(), 0);
 }
 
 // ============================================================================
@@ -562,11 +535,9 @@ fn test_filtering() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1); // Single query
-
     // Should only return vectors with similarity > 0.5
-    for (_, similarity) in &results[0] {
-        assert!(*similarity > 0.5);
+    for r in &results {
+        assert!(r.score > 0.5);
     }
 }
 
@@ -592,13 +563,8 @@ fn test_batch_queries() {
         .collect()
         .unwrap();
 
-    // Should return results for each query
+    // Batch now returns a single merged result of size 3
     assert_eq!(results.len(), 3);
-
-    // Each query should return 3 results
-    for query_results in &results {
-        assert_eq!(query_results.len(), 3);
-    }
 }
 
 #[test]
@@ -612,24 +578,15 @@ fn test_global_vs_local_scope() {
 
     let queries = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
 
-    // Test local scope (results per query)
+    // Batch returns single merged result
     let local_results = store
         .query(queries.clone(), Metric::Cosine)
         .take(2)
         .collect()
         .unwrap();
-
-    assert_eq!(local_results.len(), 2); // One result per query
-
-    // Test global scope (merged results)
-    let global_results = store
-        .query(queries, Metric::Cosine)
-        .take_global(3)
-        .collect()
-        .unwrap();
-
-    assert_eq!(global_results.len(), 1); // Single merged result
-    assert_eq!(global_results[0].len(), 3); // Top 3 globally
+    assert_eq!(local_results.len(), 2);
+    let global_results = store.query(queries, Metric::Cosine).take(3).collect().unwrap();
+    assert_eq!(global_results.len(), 3);
 }
 
 // ============================================================================
@@ -647,8 +604,7 @@ fn test_empty_store() {
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 0); // No vectors in store
+    assert_eq!(results.len(), 0); // No vectors in store
 }
 
 // ============================================================================
@@ -713,7 +669,7 @@ fn test_cosine_similarity_correctness() {
         .collect()
         .unwrap();
 
-    assert_eq!(results[0].len(), 4, "Should have all 4 vectors");
+    assert_eq!(results.len(), 4, "Should have all 4 vectors");
 
     // Find specific vectors by checking their expected similarity values
     let mut found_parallel = false;
@@ -721,22 +677,20 @@ fn test_cosine_similarity_correctness() {
     let mut found_orthogonal = false;
     let mut found_45deg = false;
 
-    for (idx, sim) in &results[0] {
+    for r in &results {
+        let sim = r.score;
         if (sim - 1.0).abs() < 1e-6 {
             found_parallel = true;
-            assert_eq!(*idx, 0, "Parallel vector should be at index 0, got {idx}");
+            assert_eq!(r.index, 0, "Parallel vector should be at index 0, got {}", r.index);
         } else if (sim - (-1.0)).abs() < 1e-6 {
             found_anti_parallel = true;
-            assert_eq!(
-                *idx, 1,
-                "Anti-parallel vector should be at index 1, got {idx}"
-            );
+            assert_eq!(r.index, 1, "Anti-parallel vector should be at index 1, got {}", r.index);
         } else if sim.abs() < 1e-6 {
             found_orthogonal = true;
-            assert_eq!(*idx, 2, "Orthogonal vector should be at index 2, got {idx}");
+            assert_eq!(r.index, 2, "Orthogonal vector should be at index 2, got {}", r.index);
         } else if (sim - (1.0 / 2.0_f32.sqrt())).abs() < 1e-5 {
             found_45deg = true;
-            assert_eq!(*idx, 3, "45° vector should be at index 3, got {idx}");
+            assert_eq!(r.index, 3, "45° vector should be at index 3, got {}", r.index);
         }
     }
 
@@ -777,31 +731,31 @@ fn test_euclidean_distance_correctness() {
         .unwrap();
 
     // Find specific results by index
-    let identical = results[0].iter().find(|(idx, _)| *idx == 0).unwrap();
-    let triangle = results[0].iter().find(|(idx, _)| *idx == 1).unwrap();
-    let diagonal = results[0].iter().find(|(idx, _)| *idx == 2).unwrap();
-    let vertical = results[0].iter().find(|(idx, _)| *idx == 3).unwrap();
-    let negative = results[0].iter().find(|(idx, _)| *idx == 4).unwrap();
+    let identical = results.iter().find(|r| r.index == 0).unwrap();
+    let triangle = results.iter().find(|r| r.index == 1).unwrap();
+    let diagonal = results.iter().find(|r| r.index == 2).unwrap();
+    let vertical = results.iter().find(|r| r.index == 3).unwrap();
+    let negative = results.iter().find(|r| r.index == 4).unwrap();
 
     // Verify mathematical correctness (squared distances)
     assert!(
-        identical.1.abs() < 1e-6,
+    identical.score.abs() < 1e-6,
         "Identical vectors should have distance 0"
     );
     assert!(
-        (triangle.1 - 25.0).abs() < 1e-6,
+    (triangle.score - 25.0).abs() < 1e-6,
         "3-4-5 triangle should have squared distance 25"
     );
     assert!(
-        (diagonal.1 - 2.0).abs() < 1e-6,
+    (diagonal.score - 2.0).abs() < 1e-6,
         "Unit diagonal should have squared distance 2"
     );
     assert!(
-        (vertical.1 - 25.0).abs() < 1e-6,
+    (vertical.score - 25.0).abs() < 1e-6,
         "Vertical distance 5 should have squared distance 25"
     );
     assert!(
-        (negative.1 - 25.0).abs() < 1e-6,
+    (negative.score - 25.0).abs() < 1e-6,
         "Negative coordinates should have squared distance 25"
     );
 }
@@ -828,8 +782,10 @@ fn test_dot_product_correctness() {
     // Verify all dot products are mathematically correct
     let mut found_results = [false; 6];
 
-    for (idx, dot_product) in &results[0] {
-        match *idx {
+    for r in &results {
+        let idx = r.index;
+        let dot_product = r.score;
+        match idx {
             0 => {
                 assert!(
                     (dot_product - 14.0).abs() < 1e-6,
@@ -882,7 +838,7 @@ fn test_dot_product_correctness() {
     }
 
     // Verify results are sorted in descending order of dot product
-    let dot_products: Vec<f32> = results[0].iter().map(|(_, dp)| *dp).collect();
+    let dot_products: Vec<f32> = results.iter().map(|r| r.score).collect();
     for i in 1..dot_products.len() {
         assert!(
             dot_products[i - 1] >= dot_products[i],
@@ -911,7 +867,7 @@ fn test_top_k_ranking_correctness() {
         .unwrap();
 
     // Results should be in descending order of similarity
-    let similarities: Vec<f32> = results[0].iter().map(|(_, sim)| *sim).collect();
+    let similarities: Vec<f32> = results.iter().map(|r| r.score).collect();
 
     // Verify correct ranking
     assert!(
@@ -966,7 +922,7 @@ fn test_euclidean_ranking_correctness() {
         .unwrap();
 
     // Results should be in ascending order of distance
-    let distances: Vec<f32> = results[0].iter().map(|(_, dist)| *dist).collect();
+    let distances: Vec<f32> = results.iter().map(|r| r.score).collect();
 
     // Verify correct ranking (squared distances)
     assert!(distances[0].abs() < 1e-6, "Shortest distance should be 0");
@@ -1021,11 +977,12 @@ fn test_filter_threshold_correctness() {
         .unwrap();
 
     // Should only include vectors with similarity > 0.7 (1.0 and 0.8)
-    assert_eq!(above_07[0].len(), 2);
-    for (_, sim) in &above_07[0] {
+    assert_eq!(above_07.len(), 2);
+    for r in &above_07 {
         assert!(
-            *sim > 0.7,
-            "All results should have similarity > 0.7, got {sim}"
+            r.score > 0.7,
+            "All results should have similarity > 0.7, got {}",
+            r.score
         );
     }
 
@@ -1037,11 +994,12 @@ fn test_filter_threshold_correctness() {
         .unwrap();
 
     // Should include vectors with similarity >= 0.6 (1.0, 0.8, 0.6)
-    assert_eq!(above_equal_06[0].len(), 3);
-    for (_, sim) in &above_equal_06[0] {
+    assert_eq!(above_equal_06.len(), 3);
+    for r in &above_equal_06 {
         assert!(
-            *sim >= 0.6,
-            "All results should have similarity >= 0.6, got {sim}"
+            r.score >= 0.6,
+            "All results should have similarity >= 0.6, got {}",
+            r.score
         );
     }
 
@@ -1053,11 +1011,12 @@ fn test_filter_threshold_correctness() {
         .unwrap();
 
     // Should include vectors with similarity < 0.5 (0.0, -0.6)
-    assert_eq!(below_05[0].len(), 2);
-    for (_, sim) in &below_05[0] {
+    assert_eq!(below_05.len(), 2);
+    for r in &below_05 {
         assert!(
-            *sim < 0.5,
-            "All results should have similarity < 0.5, got {sim}"
+            r.score < 0.5,
+            "All results should have similarity < 0.5, got {}",
+            r.score
         );
     }
 }
@@ -1081,18 +1040,10 @@ fn test_batch_query_correctness() {
         .take(1) // Only get the most similar for each
         .collect()
         .unwrap();
-
-    assert_eq!(results.len(), 2);
-
-    // First query should find vector at index 0 with similarity 1.0
-    assert_eq!(results[0].len(), 1);
-    assert_eq!(results[0][0].0, 0); // index 0
-    assert!((results[0][0].1 - 1.0).abs() < 1e-6); // similarity 1.0
-
-    // Second query should find vector at index 1 with similarity 1.0
-    assert_eq!(results[1].len(), 1);
-    assert_eq!(results[1][0].0, 1); // index 1
-    assert!((results[1][0].1 - 1.0).abs() < 1e-6); // similarity 1.0
+    // Aggregated batch returns a single top-1 across both queries
+    assert_eq!(results.len(), 1);
+    assert!((results[0].score - 1.0).abs() < 1e-6);
+    assert!(results[0].index == 0 || results[0].index == 1);
 }
 
 // ============================================================================
@@ -1122,11 +1073,9 @@ fn test_api_design_showcase() -> Result<(), String> {
         .take_min(10) // Get 10 closest
         .collect()?; // Only error handling point
 
-    assert_eq!(results.len(), 1); // Single query
-
     // All results should have similarity > 0.8
-    for (_, similarity) in &results[0] {
-        assert!(*similarity > 0.8);
+    for r in &results {
+        assert!(r.score > 0.8);
     }
 
     Ok(())
@@ -1189,25 +1138,19 @@ fn test_error_propagation_in_take_methods() {
     let plan1 = plan.take(5);
     assert!(plan1.collect().is_err());
 
-    let plan = VecQueryPlan::new();
-    let plan2 = plan.take_global(5);
-    assert!(plan2.collect().is_err());
+    // take_global removed; take already returns merged results
 
     let plan = VecQueryPlan::new();
     let plan3 = plan.take_min(5);
     assert!(plan3.collect().is_err());
 
-    let plan = VecQueryPlan::new();
-    let plan4 = plan.take_min_global(5);
-    assert!(plan4.collect().is_err());
+    // take_min_global removed
 
     let plan = VecQueryPlan::new();
     let plan5 = plan.take_max(5);
     assert!(plan5.collect().is_err());
 
-    let plan = VecQueryPlan::new();
-    let plan6 = plan.take_max_global(5);
-    assert!(plan6.collect().is_err());
+    // take_max_global removed
 }
 
 #[test]
@@ -1242,7 +1185,7 @@ fn test_filter_with_all_comparison_operators() {
         .take(10)
         .collect()
         .unwrap();
-    assert!(!results[0].is_empty());
+    assert!(!results.is_empty());
 
     // Test Gt filter
     let results = store
@@ -1251,7 +1194,7 @@ fn test_filter_with_all_comparison_operators() {
         .take(10)
         .collect()
         .unwrap();
-    assert!(!results[0].is_empty());
+    assert!(!results.is_empty());
 
     // Test Leq filter
     let results = store
@@ -1260,7 +1203,7 @@ fn test_filter_with_all_comparison_operators() {
         .take(10)
         .collect()
         .unwrap();
-    assert!(!results[0].is_empty());
+    assert!(!results.is_empty());
 
     // Test Geq filter
     let results = store
@@ -1269,7 +1212,7 @@ fn test_filter_with_all_comparison_operators() {
         .take(10)
         .collect()
         .unwrap();
-    assert!(!results[0].is_empty());
+    assert!(!results.is_empty());
 
     // Test Eq filter (this should be rare but needs coverage)
     let results = store
@@ -1279,7 +1222,7 @@ fn test_filter_with_all_comparison_operators() {
         .collect()
         .unwrap();
     // Should find the exact match (first vector)
-    assert!(!results[0].is_empty());
+    assert!(!results.is_empty());
 }
 
 #[test]
@@ -1330,14 +1273,12 @@ fn test_global_scope_functionality() {
 
     let results = store
         .query(queries, Metric::Cosine)
-        .take_global(2)
+        .take(2)
         .collect()
         .unwrap();
 
-    // With global scope, we should get a single result vector containing
-    // the top 2 results across all queries
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].len(), 2);
+    // With global (and now default) scope, we get top 2 across queries
+    assert_eq!(results.len(), 2);
 }
 
 #[test]
@@ -1354,7 +1295,7 @@ fn test_filter_and_merge_with_no_filtering() {
         .collect()
         .unwrap();
 
-    assert_eq!(results[0].len(), 2);
+    assert_eq!(results.len(), 2);
 }
 
 #[test]
@@ -1394,7 +1335,7 @@ fn test_take_closest_and_farthest_methods() {
         .take_min(2)
         .collect()
         .unwrap();
-    assert_eq!(results[0].len(), 2);
+    assert_eq!(results.len(), 2);
 
     // Test take_farthest - should prioritize larger distances
     let results = store
@@ -1402,27 +1343,25 @@ fn test_take_closest_and_farthest_methods() {
         .take_max(2)
         .collect()
         .unwrap();
-    assert_eq!(results[0].len(), 2);
+    assert_eq!(results.len(), 2);
 
     // Test take_closest_global
     let queries = vec![query.clone(), vec![0.0, 1.0]];
     let results = store
         .query(queries, Metric::Euclidean)
-        .take_min_global(1)
+        .take_min(1)
         .collect()
         .unwrap();
-    assert_eq!(results.len(), 1); // Global scope
-    assert_eq!(results[0].len(), 1);
+    assert_eq!(results.len(), 1);
 
     // Test take_farthest_global
     let queries = vec![query, vec![0.0, 1.0]];
     let results = store
         .query(queries, Metric::Euclidean)
-        .take_max_global(1)
+        .take_max(1)
         .collect()
         .unwrap();
-    assert_eq!(results.len(), 1); // Global scope
-    assert_eq!(results[0].len(), 1);
+    assert_eq!(results.len(), 1);
 }
 
 #[test]
@@ -1446,7 +1385,8 @@ fn test_query_batch_conversions() {
         .take(1)
         .collect()
         .unwrap();
-    assert_eq!(results.len(), 2); // Two queries, so two result sets
+    // Batch returns merged results; size equals take count
+    assert_eq!(results.len(), 1);
 }
 
 #[test]
@@ -1462,7 +1402,6 @@ fn test_error_states_in_chained_operations() {
     let final_plan = plan
         .filter(0.5, Cmp::Gt)
         .take(5)
-        .take_global(3)
         .take_min(2)
         .take_max(1);
 
@@ -1495,7 +1434,7 @@ fn test_filtering_edge_cases() {
         .take(10)
         .collect()
         .unwrap();
-    assert!(results[0].is_empty());
+    assert!(results.is_empty());
 
     // Test filtering with exact equality
     let results = store
@@ -1504,5 +1443,5 @@ fn test_filtering_edge_cases() {
         .take(10)
         .collect()
         .unwrap();
-    assert_eq!(results[0].len(), 1);
+    assert_eq!(results.len(), 1);
 }
