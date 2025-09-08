@@ -73,7 +73,7 @@ fn zonemap_prunes_numeric_with_nulls() {
     // val > 5 should prune chunk0 (max=2) and chunk2 (all null) leaving only chunk1
     let results = store
         .query(vec![1.0, 0.0], Metric::DotProduct)
-    .meta_filter(col("val").gt(5))
+        .meta_filter(col("val").gt(5))
         .take(9)
         .collect()
         .unwrap();
@@ -95,7 +95,7 @@ fn zonemap_boundary_conditions() {
     // val >= 2 should keep chunk0 (range 1..2) + chunk1, prune chunk2
     let _ = store
         .query(vec![1.0, 0.0], Metric::Cosine)
-    .meta_filter(col("val").gte(2))
+        .meta_filter(col("val").gte(2))
         .take(9)
         .collect()
         .unwrap();
@@ -106,7 +106,7 @@ fn zonemap_boundary_conditions() {
     // val > 2 should drop chunk0 now (max=2) and the all-null chunk2 => only chunk1
     let _ = store
         .query(vec![1.0, 0.0], Metric::Cosine)
-    .meta_filter(col("val").gt(2))
+        .meta_filter(col("val").gt(2))
         .take(9)
         .collect()
         .unwrap();
@@ -121,7 +121,7 @@ fn zonemap_all_null_chunk_pruned_for_equality() {
     // Filter on grade == "A"; chunk2 has only nulls => should be pruned.
     let _ = store
         .query(vec![1.0, 0.0], Metric::Cosine)
-    .meta_filter(col("grade").eq("A"))
+        .meta_filter(col("grade").eq("A"))
         .take(9)
         .collect()
         .unwrap();
@@ -136,7 +136,7 @@ fn zonemap_and_clause_numeric_datetime() {
     // (val > 5) AND (ts < 2025-01-01) should yield only row 5 (val=12, ts=2024-12-31.. )
     let results = store
         .query(vec![1.0, 0.0], Metric::DotProduct)
-    .meta_filter(col("val").gt(5).and(col("ts").lt("2025-01-01T00:00:00Z")))
+        .meta_filter(col("val").gt(5).and(col("ts").lt("2025-01-01T00:00:00Z")))
         .take(9)
         .collect()
         .unwrap();
@@ -161,7 +161,7 @@ fn zonemap_ne_comparator_with_null_only_chunk() {
     // val != 1 — semantically could match many rows, but the all-null chunk must still be pruned.
     let _ = store
         .query(vec![1.0, 0.0], Metric::Cosine)
-    .meta_filter(col("val").neq(1))
+        .meta_filter(col("val").neq(1))
         .take(9)
         .collect()
         .unwrap();
