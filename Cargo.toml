@@ -2,6 +2,10 @@
 name = "otters"
 version = "0.1.0"
 edition = "2024"
+description = "High-performance vector search with metadata filtering"
+license = "MIT"
+repository = "https://github.com/atharvbhat/otters"
+readme = "README.md"
 
 [dependencies]
 bitvec = "1.0.1"

@@ -485,7 +485,7 @@ impl Column {
     }
 
     /// Get raw stored values as a unified wrapper
-    pub fn values(&self) -> ColumnValues {
+    pub fn values(&self) -> ColumnValues<'_> {
         match &self.data {
             ColumnData::Int32(vec) => ColumnValues::Int32(vec),
             ColumnData::Int64(vec) => ColumnValues::Int64(vec),
@@ -505,10 +505,10 @@ fn parse_datetime(s: &str) -> Result<i64, ColumnError> {
     }
 
     // Try YYYY-MM-DD
-    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        if let Some(dt) = date.and_hms_opt(0, 0, 0) {
-            return Ok(dt.and_utc().timestamp_millis());
-        }
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        && let Some(dt) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(dt.and_utc().timestamp_millis());
     }
 
     // Try YYYY-MM-DD HH:MM:SS
@@ -528,10 +528,10 @@ fn parse_datetime_fmt(s: &str, format: &str) -> Result<i64, ColumnError> {
     }
 
     // Try as date only
-    if let Ok(date) = NaiveDate::parse_from_str(s, format) {
-        if let Some(dt) = date.and_hms_opt(0, 0, 0) {
-            return Ok(dt.and_utc().timestamp_millis());
-        }
+    if let Ok(date) = NaiveDate::parse_from_str(s, format)
+        && let Some(dt) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(dt.and_utc().timestamp_millis());
     }
 
     Err(ColumnError::ParseError(format!(

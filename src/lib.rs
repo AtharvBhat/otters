@@ -1,3 +1,8 @@
+//! High-performance vector search with metadata filtering.
+//!
+//! Otters provides columnar storage, vector indexes, and query planning
+//! utilities for building efficient similarity search applications.
+
 pub mod col;
 pub mod expr;
 pub mod meta;

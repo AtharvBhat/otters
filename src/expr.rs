@@ -221,10 +221,10 @@ fn parse_datetime_literal_millis(s: &str) -> Option<i64> {
     if let Ok(dt) = ChronoDateTime::parse_from_rfc3339(s) {
         return Some(dt.with_timezone(&Utc).timestamp_millis());
     }
-    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        if let Some(dt) = date.and_hms_opt(0, 0, 0) {
-            return Some(dt.and_utc().timestamp_millis());
-        }
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        && let Some(dt) = date.and_hms_opt(0, 0, 0)
+    {
+        return Some(dt.and_utc().timestamp_millis());
     }
     if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
         return Some(dt.and_utc().timestamp_millis());

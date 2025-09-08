@@ -110,10 +110,10 @@ impl<'a> VecQueryPlan<'a> {
         self.take_count = Some(count);
         if let Some(tt) = take_type {
             self.take_type = Some(tt);
-        } else if self.take_type.is_none() {
-            if let Some(metric) = self.search_metric {
-                self.take_type = Some(Self::infer_default_take_type(&metric));
-            }
+        } else if self.take_type.is_none()
+            && let Some(metric) = self.search_metric
+        {
+            self.take_type = Some(Self::infer_default_take_type(&metric));
         }
         self
     }
@@ -239,10 +239,10 @@ impl<'a> VecQueryPlan<'a> {
                     .zip(query_vectors_inv_norms.iter())
                     .for_each(|(query, &query_inv_norm)| {
                         for i in 0..8 {
-                            if let Some(mask) = bm.as_ref() {
-                                if !mask[i] {
-                                    continue;
-                                }
+                            if let Some(mask) = bm.as_ref()
+                                && !mask[i]
+                            {
+                                continue;
                             }
                             let row = base_row + i;
                             let start = row * vector_store.dim;
@@ -375,7 +375,7 @@ impl VecStore {
         self.n_vecs == 0
     }
 
-    pub fn query(&self, queries: impl Into<QueryBatch>, metric: Metric) -> VecQueryPlan {
+    pub fn query(&self, queries: impl Into<QueryBatch>, metric: Metric) -> VecQueryPlan<'_> {
         let query_batch = queries.into();
 
         let inv_norms: Vec<f32> = query_batch
