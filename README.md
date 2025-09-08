@@ -6,7 +6,6 @@
 
 Otters is a minimal, exact vector search library with expressive metadata filtering. Think “Polars for vector search.”
 
-
 Otters targets smaller to mid-size datasets (up to ~10M vectors) where:
 - You want exact results, not approximate indices.
 - You care about not just vector search but also rich metadata filtering.
@@ -100,7 +99,11 @@ meta.head();
 // Query similar items, price <= 40, version >= 2, fresh
 let results = meta
     .query(vec![1.0, 0.0, 0.0, 0.0], Metric::Cosine)
-    .meta_filter(col("price").lte(40.0) & col("version").gte(2) & col("mfg").gte("2024-01-01") & col("exp").gte("2024-06-01"))?
+    .meta_filter(
+        col("price").lte(40.0) 
+        & col("version").gte(2) 
+        & col("mfg").gte("2024-01-01") 
+        & col("exp").gte("2024-06-01"))?
     .take(5)
     .collect()?;
 
