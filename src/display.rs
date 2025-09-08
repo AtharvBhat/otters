@@ -163,11 +163,39 @@ impl fmt::Display for MetaQueryResults {
         let mut headers = vec!["index".to_string(), "score".to_string()];
         headers.extend(self.columns.iter().cloned());
 
-        let mut rows: Vec<Vec<String>> = Vec::with_capacity(self.rows.len());
-        for r in &self.rows {
-            let mut line = vec![r.index.to_string(), format!("{:.6}", r.score)];
+        let mut rows: Vec<Vec<String>> = Vec::with_capacity(self.len());
+        for i in 0..self.len() {
+            let mut line = vec![self.indices[i].to_string(), format!("{:.6}", self.scores[i])];
             for c in &self.columns {
-                line.push(r.entries.get(c).cloned().unwrap_or_default());
+                if let Some(col) = self.data.get(c) {
+                    let is_null = col
+                        .null_mask()
+                        .get(i)
+                        .map(|b| *b)
+                        .unwrap_or(false);
+                    if is_null {
+                        line.push("NULL".to_string());
+                    } else {
+                        let cell = match col.dtype() {
+                            DataType::Int32 => col.i32_values().map(|v| v[i].to_string()).unwrap(),
+                            DataType::Int64 => col.i64_values().map(|v| v[i].to_string()).unwrap(),
+                            DataType::Float32 => col.f32_values().map(|v| format!("{:.4}", v[i])).unwrap(),
+                            DataType::Float64 => col.f64_values().map(|v| format!("{:.4}", v[i])).unwrap(),
+                            DataType::String => col.string_values().map(|v| v[i].clone()).unwrap(),
+                            DataType::DateTime => col
+                                .datetime_values()
+                                .map(|v| {
+                                    DateTime::from_timestamp_millis(v[i])
+                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                                        .unwrap_or_else(|| format!("{}", v[i]))
+                                })
+                                .unwrap(),
+                        };
+                        line.push(cell);
+                    }
+                } else {
+                    line.push(String::new());
+                }
             }
             rows.push(line);
         }

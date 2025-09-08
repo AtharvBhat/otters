@@ -342,25 +342,6 @@ impl VecStore {
         vectors.iter().try_for_each(|x| self.add_vector(x.to_vec()))
     }
 
-    // Move vectors into the store without cloning individual vectors
-    pub fn add_vectors_owned(&mut self, vectors: Vec<Vec<f32>>) -> Result<(), String> {
-        for vector in vectors.into_iter() {
-            if vector.len() != self.dim {
-                return Err(format!(
-                    "Input vector length {} does not match expected dimension {}",
-                    vector.len(),
-                    self.dim
-                ));
-            }
-            let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let inv = if norm != 0.0 { 1.0 / norm } else { 0.0 };
-            self.inv_norms.push(inv);
-            self.n_vecs += 1;
-            self.vectors.extend_from_slice(&vector);
-        }
-        Ok(())
-    }
-
     pub fn len(&self) -> usize {
         self.n_vecs
     }

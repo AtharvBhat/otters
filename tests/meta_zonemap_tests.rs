@@ -70,7 +70,7 @@ fn zonemap_prunes_numeric_with_nulls() {
         .unwrap();
 
     // Expect only rows 3,4,5 (values 10,11,12)
-    let indices: std::collections::HashSet<usize> = results.rows.iter().map(|r| r.index).collect();
+    let indices: std::collections::HashSet<usize> = results.indices.iter().cloned().collect();
     assert_eq!(indices, [3usize, 4usize, 5usize].into_iter().collect());
 
     let stats = store.last_query_stats().unwrap();
@@ -141,7 +141,7 @@ fn zonemap_and_clause_numeric_datetime() {
         .unwrap();
 
     assert_eq!(results.len(), 1, "Exactly one row should satisfy both predicates");
-    assert_eq!(results.rows[0].index, 5);
+    assert_eq!(results.indices[0], 5);
 
     let stats = store.last_query_stats().unwrap();
     assert_eq!(stats.total_chunks, 3);

@@ -30,7 +30,7 @@ fn meta_basic_pruning_and_stats() {
         .unwrap();
 
     // Only idx 2 matches age>15 and grade==A
-    let set: std::collections::HashSet<usize> = results.rows.iter().map(|r| r.index).collect();
+    let set: std::collections::HashSet<usize> = results.indices.iter().cloned().collect();
     assert!(set.contains(&2));
     assert_eq!(set.len(), 1);
 
@@ -117,7 +117,7 @@ fn meta_datetime_range_filter() {
         .take(3)
         .collect()
         .unwrap();
-    let set: std::collections::HashSet<usize> = results.rows.iter().map(|r| r.index).collect();
+    let set: std::collections::HashSet<usize> = results.indices.iter().cloned().collect();
     assert_eq!(set, [0usize, 1usize].into_iter().collect());
 }
 

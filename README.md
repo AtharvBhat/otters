@@ -190,6 +190,12 @@ let e3 = col("grade").eq("A") | col("grade").eq("B");
 ```
 
 ## Roadmap
+- Test with real datasets
+- Persistence (save/load MetaStore to/from disk)
+- Mutability (add/remove rows after build)
+- Quantization for vectors
+- More Metrics (Manhattan, Hamming, Jaccard)
+- More features to handle string columns (e.g. `contains`, `starts_with`, `ends_with` or fuzzy matching)
 - More Metadata Types and Filters
 - Ability to reorder metadata for better pruning ( Something like Z-ordering )
 - Integration with Parquet/Arrow formats

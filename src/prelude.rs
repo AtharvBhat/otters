@@ -21,7 +21,7 @@ pub use crate::col::*;
 pub use crate::expr::*;
 
 // Metadata store and result types
-pub use crate::meta::{MetaBuildStats, MetaQueryResults, MetaQueryStats, MetaResultRow, MetaStore};
+pub use crate::meta::{MetaBuildStats, MetaQueryResults, MetaQueryStats, MetaStore};
 
 // Public data types (avoid exposing low-level SIMD wrappers)
 pub use crate::type_utils::DataType;

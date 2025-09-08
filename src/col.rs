@@ -51,7 +51,6 @@ pub enum ColumnValues<'a> {
 }
 
 impl<'a> ColumnValues<'a> {
-    /// Get the length of the underlying data
     pub fn len(&self) -> usize {
         match self {
             ColumnValues::Int32(vec) => vec.len(),
@@ -63,12 +62,10 @@ impl<'a> ColumnValues<'a> {
         }
     }
 
-    /// Check if the values are empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Get the data type of the values
     pub fn data_type(&self) -> DataType {
         match self {
             ColumnValues::Int32(_) => DataType::Int32,
@@ -94,7 +91,7 @@ impl fmt::Display for ColumnError {
 
 impl std::error::Error for ColumnError {}
 
-// Conversion implementations for ColumnValue
+// Type Conversions for ColumnValue
 impl From<Option<i32>> for ColumnValue {
     fn from(value: Option<i32>) -> Self {
         ColumnValue::Int32(value)
@@ -496,53 +493,6 @@ impl Column {
             ColumnData::Float64(vec) => ColumnValues::Float64(vec),
             ColumnData::String(vec) => ColumnValues::String(vec),
             ColumnData::DateTime(vec) => ColumnValues::DateTime(vec),
-        }
-    }
-
-    /// Extend the column with a batch of values. Null mask entries are all set to false (non-null).
-    pub fn extend<'a>(&mut self, values: ColumnValues<'a>) -> Result<(), ColumnError> {
-        match (&mut self.data, values) {
-            (ColumnData::Int32(dest), ColumnValues::Int32(src)) => {
-                dest.extend(src.iter().cloned());
-                let add = src.len();
-                self.null_mask.resize(self.null_mask.len() + add, false);
-                Ok(())
-            }
-            (ColumnData::Int64(dest), ColumnValues::Int64(src)) => {
-                dest.extend(src.iter().cloned());
-                let add = src.len();
-                self.null_mask.resize(self.null_mask.len() + add, false);
-                Ok(())
-            }
-            (ColumnData::Float32(dest), ColumnValues::Float32(src)) => {
-                dest.extend(src.iter().cloned());
-                let add = src.len();
-                self.null_mask.resize(self.null_mask.len() + add, false);
-                Ok(())
-            }
-            (ColumnData::Float64(dest), ColumnValues::Float64(src)) => {
-                dest.extend(src.iter().cloned());
-                let add = src.len();
-                self.null_mask.resize(self.null_mask.len() + add, false);
-                Ok(())
-            }
-            (ColumnData::String(dest), ColumnValues::String(src)) => {
-                dest.extend(src.iter().cloned());
-                let add = src.len();
-                self.null_mask.resize(self.null_mask.len() + add, false);
-                Ok(())
-            }
-            (ColumnData::DateTime(dest), ColumnValues::DateTime(src)) => {
-                dest.extend(src.iter().cloned());
-                let add = src.len();
-                self.null_mask.resize(self.null_mask.len() + add, false);
-                Ok(())
-            }
-            // Type mismatch
-            _ => Err(ColumnError::TypeMismatch {
-                expected: self.dtype,
-                got: "mismatched batch values".to_string(),
-            }),
         }
     }
 }

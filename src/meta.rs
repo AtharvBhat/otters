@@ -20,38 +20,24 @@ use crate::{
 use bitvec::bitvec;
 use bitvec::prelude::BitVec;
 use rayon::prelude::*;
-use chrono::DateTime;
 
-// ASCII table rendering moved to crate::display
-
-/// One row of a MetaStore search result, including index, score and column values.
-#[derive(Clone)]
-pub struct MetaResultRow {
-    pub index: usize,
-    pub score: f32,
-    pub entries: HashMap<String, String>,
-}
-
-// Debug/Display impls for MetaResultRow are not required externally; keep derived Debug via struct fmt
-
-/// Meta query results wrapper; pretty Display output is in display.rs
-#[derive(Clone)]
 pub struct MetaQueryResults {
-    pub columns: Vec<String>, // stable, sorted column order
-    pub rows: Vec<MetaResultRow>,
+    pub columns: Vec<String>,
+    pub data: HashMap<String, Column>,
+    pub indices: Vec<usize>,
+    pub scores: Vec<f32>,
 }
 
 impl MetaQueryResults {
-    pub fn len(&self) -> usize { self.rows.len() }
-    pub fn is_empty(&self) -> bool { self.rows.is_empty() }
+    pub fn len(&self) -> usize { self.indices.len() }
+    pub fn is_empty(&self) -> bool { self.indices.is_empty() }
+    pub fn column(&self, name: &str) -> Option<&Column> { self.data.get(name) }
 }
 
-// MetaChunk moved to meta_compute.rs
 
 #[derive(Debug, Clone, Copy)]
 pub enum BloomConfig {
     Fpr(f64),
-    // Total number of bits for the Bloom filter backing store
     Bits(usize),
 }
 
@@ -210,7 +196,7 @@ impl MetaStoreBuilder {
                 Vec::with_capacity(self.chunk_size.min(n_rows - base_offset));
             for _ in 0..self.chunk_size {
                 if let Some(v) = iter.next() {
-                    chunk_vecs.push(v); // move, no clone
+                    chunk_vecs.push(v);
                 } else {
                     break;
                 }
@@ -221,7 +207,7 @@ impl MetaStoreBuilder {
 
             let mut vs = VecStore::new(dim);
             let ingest_start = Instant::now();
-            vs.add_vectors_owned(chunk_vecs)?; // move vectors into the store without cloning
+            vs.add_vectors(chunk_vecs)?;
             vectors_ingest_duration += ingest_start.elapsed();
 
             let end = base_offset + vs.len(); // length of this chunk
@@ -729,46 +715,95 @@ impl<'a> MetaQueryPlan<'a> {
             total_duration,
         };
         *self.store.last_stats.borrow_mut() = Some(stats);
-        // Build rich result rows with metadata entries for each index
+        // Build result columns (typed) and collect indices/scores in result order
         let mut col_names: Vec<String> = self.store.schema.keys().cloned().collect();
         col_names.sort();
 
-        let mut rows: Vec<MetaResultRow> = Vec::with_capacity(aggregated.len());
-        for (idx, score) in aggregated.iter().cloned() {
-            let mut entries: HashMap<String, String> = HashMap::with_capacity(col_names.len());
-            for name in &col_names {
-                if let Some(col) = self.store.columns.get(name) {
-                    let is_null = col
-                        .null_mask()
-                        .get(idx)
-                        .map(|b| *b)
-                        .unwrap_or(false);
-                    if is_null {
-                        entries.insert(name.clone(), "NULL".to_string());
-                    } else {
-                        let cell = match col.dtype() {
-                            DataType::Int32 => col.i32_values().map(|v| v[idx].to_string()).unwrap(),
-                            DataType::Int64 => col.i64_values().map(|v| v[idx].to_string()).unwrap(),
-                            DataType::Float32 => col.f32_values().map(|v| format!("{:.4}", v[idx])).unwrap(),
-                            DataType::Float64 => col.f64_values().map(|v| format!("{:.4}", v[idx])).unwrap(),
-                            DataType::String => col.string_values().map(|v| v[idx].clone()).unwrap(),
-                            DataType::DateTime => col
-                                .datetime_values()
-                                .map(|v| {
-                                    DateTime::from_timestamp_millis(v[idx])
-                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                                        .unwrap_or_else(|| format!("{}", v[idx]))
-                                })
-                                .unwrap(),
-                        };
-                        entries.insert(name.clone(), cell);
-                    }
-                }
-            }
-            rows.push(MetaResultRow { index: idx, score, entries });
+        let mut indices: Vec<usize> = Vec::with_capacity(aggregated.len());
+        let mut scores: Vec<f32> = Vec::with_capacity(aggregated.len());
+        for (idx, sc) in aggregated.iter().cloned() {
+            indices.push(idx);
+            scores.push(sc);
         }
 
-        Ok(MetaQueryResults { columns: col_names, rows })
+        // Materialize typed columns with values copied from source columns
+        let mut data: HashMap<String, Column> = HashMap::with_capacity(col_names.len());
+        for name in &col_names {
+            if let Some(src) = self.store.columns.get(name) {
+                let mut dst = Column::new(name, src.dtype());
+                match src.dtype() {
+                    DataType::Int32 => {
+                        let vals = src.i32_values().unwrap();
+                        let nulls = src.null_mask();
+                        for &gi in &indices {
+                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                dst.push(Option::<i32>::None).map_err(|e| e.to_string())?;
+                            } else {
+                                dst.push(vals[gi]).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                    DataType::Int64 => {
+                        let vals = src.i64_values().unwrap();
+                        let nulls = src.null_mask();
+                        for &gi in &indices {
+                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                dst.push(Option::<i64>::None).map_err(|e| e.to_string())?;
+                            } else {
+                                dst.push(vals[gi]).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                    DataType::Float32 => {
+                        let vals = src.f32_values().unwrap();
+                        let nulls = src.null_mask();
+                        for &gi in &indices {
+                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                dst.push(Option::<f32>::None).map_err(|e| e.to_string())?;
+                            } else {
+                                dst.push(vals[gi]).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                    DataType::Float64 => {
+                        let vals = src.f64_values().unwrap();
+                        let nulls = src.null_mask();
+                        for &gi in &indices {
+                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                dst.push(Option::<f64>::None).map_err(|e| e.to_string())?;
+                            } else {
+                                dst.push(vals[gi]).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                    DataType::String => {
+                        let vals = src.string_values().unwrap();
+                        let nulls = src.null_mask();
+                        for &gi in &indices {
+                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                dst.push(Option::<&str>::None).map_err(|e| e.to_string())?;
+                            } else {
+                                dst.push(vals[gi].as_str()).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                    DataType::DateTime => {
+                        let vals = src.datetime_values().unwrap();
+                        let nulls = src.null_mask();
+                        for &gi in &indices {
+                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                dst.push(crate::col::ColumnValue::DateTime(None)).map_err(|e| e.to_string())?;
+                            } else {
+                                dst.push(crate::col::ColumnValue::DateTime(Some(vals[gi]))).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                }
+                data.insert(name.clone(), dst);
+            }
+        }
+
+        Ok(MetaQueryResults { columns: col_names, data, indices, scores })
     }
 }
 
