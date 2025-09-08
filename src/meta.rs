@@ -19,6 +19,7 @@ use crate::{
 };
 use bitvec::bitvec;
 use bitvec::prelude::BitVec;
+use itertools::Itertools;
 use rayon::prelude::*;
 
 pub struct MetaQueryResults {
@@ -196,22 +197,13 @@ impl MetaStoreBuilder {
         let mut packed_ranges_f32: HashMap<String, PackedRanges<f32>> = HashMap::new();
         let mut packed_ranges_i32: HashMap<String, PackedRanges<i32>> = HashMap::new();
 
-        // Build chunks without cloning vectors: consume the owned vectors in order
+        // Build chunks without cloning vectors: consume the owned vectors in chunked groups
         let mut chunks: Vec<MetaChunk> = Vec::new();
         let mut base_offset = 0usize;
-        let mut iter = vectors.into_iter();
-        loop {
-            let mut chunk_vecs: Vec<Vec<f32>> =
-                Vec::with_capacity(self.chunk_size.min(n_rows - base_offset));
-            for _ in 0..self.chunk_size {
-                if let Some(v) = iter.next() {
-                    chunk_vecs.push(v);
-                } else {
-                    break;
-                }
-            }
+        for chunk_iter in &vectors.into_iter().chunks(self.chunk_size) {
+            let chunk_vecs: Vec<Vec<f32>> = chunk_iter.collect();
             if chunk_vecs.is_empty() {
-                break;
+                continue;
             }
 
             let mut vs = VecStore::new(dim);
@@ -222,25 +214,29 @@ impl MetaStoreBuilder {
             let end = base_offset + vs.len(); // length of this chunk
 
             // Build stats for this chunk
-            let mut stats: HashMap<String, ZoneStat> = HashMap::new();
             let zstart = Instant::now();
-            for (name, dtype) in &self.schema {
-                let col = self
-                    .columns
-                    .get(name)
-                    .ok_or_else(|| format!("missing column '{name}' in builder columns"))?;
-                let bloom_cfg = match self.bloom {
-                    BloomConfig::Fpr(p) => BloomBuild::Fpr(p),
-                    BloomConfig::Bits(b) => BloomBuild::Bits(b),
-                };
-                let stat = build_zone_stat_for_range(col, *dtype, base_offset, end, bloom_cfg)?;
-                stats.insert(name.clone(), stat);
-            }
+            let bloom_cfg = match self.bloom {
+                BloomConfig::Fpr(p) => BloomBuild::Fpr(p),
+                BloomConfig::Bits(b) => BloomBuild::Bits(b),
+            };
+            let stats: HashMap<String, ZoneStat> = self
+                .schema
+                .iter()
+                .map(|(name, dtype)| {
+                    let col = self
+                        .columns
+                        .get(name)
+                        .ok_or_else(|| format!("missing column '{name}' in builder columns"))?;
+                    let stat = build_zone_stat_for_range(col, *dtype, base_offset, end, bloom_cfg)?;
+                    Ok::<(String, ZoneStat), String>((name.clone(), stat))
+                })
+                .collect::<Result<_, _>>()?;
             zonemap_build_duration += zstart.elapsed();
 
             // Append packed per-chunk ranges
-            for (name, dtype) in &self.schema {
-                match (dtype, stats.get(name).unwrap()) {
+            self.schema
+                .iter()
+                .for_each(|(name, dtype)| match (dtype, stats.get(name).unwrap()) {
                     (DataType::Float32, ZoneStat::Float { min, max, non_null }) => {
                         let e32 = packed_ranges_f32.entry(name.clone()).or_default();
                         e32.min.push(*min as f32);
@@ -272,8 +268,7 @@ impl MetaStoreBuilder {
                         entry.non_null.push(*non_null);
                     }
                     _ => {}
-                }
-            }
+                });
 
             chunks.push(MetaChunk {
                 base_offset,
@@ -283,9 +278,6 @@ impl MetaStoreBuilder {
             });
 
             base_offset = end;
-            if base_offset >= n_rows {
-                break;
-            }
         }
 
         let build_total_duration = build_start.elapsed();
@@ -705,10 +697,10 @@ impl<'a> MetaQueryPlan<'a> {
             })
             .collect();
 
-        for agg in per_chunk {
+        per_chunk.into_iter().for_each(|agg| {
             vectors_compared += agg.compared;
-            aggregated.extend(agg.results.into_iter());
-        }
+            aggregated.extend(agg.results);
+        });
         let score_duration = score_start.elapsed();
 
         let merge_start = Instant::now();
@@ -738,12 +730,7 @@ impl<'a> MetaQueryPlan<'a> {
         let mut col_names: Vec<String> = self.store.schema.keys().cloned().collect();
         col_names.sort();
 
-        let mut indices: Vec<usize> = Vec::with_capacity(aggregated.len());
-        let mut scores: Vec<f32> = Vec::with_capacity(aggregated.len());
-        for (idx, sc) in aggregated.iter().cloned() {
-            indices.push(idx);
-            scores.push(sc);
-        }
+        let (indices, scores): (Vec<usize>, Vec<f32>) = aggregated.iter().cloned().unzip();
 
         // Materialize typed columns with values copied from source columns
         let mut data: HashMap<String, Column> = HashMap::with_capacity(col_names.len());
@@ -754,70 +741,86 @@ impl<'a> MetaQueryPlan<'a> {
                     DataType::Int32 => {
                         let vals = src.i32_values().unwrap();
                         let nulls = src.null_mask();
-                        for &gi in &indices {
-                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
-                                dst.push(Option::<i32>::None).map_err(|e| e.to_string())?;
-                            } else {
-                                dst.push(vals[gi]).map_err(|e| e.to_string())?;
-                            }
-                        }
+                        indices
+                            .iter()
+                            .try_for_each(|&gi| {
+                                if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                    dst.push(Option::<i32>::None)
+                                } else {
+                                    dst.push(vals[gi])
+                                }
+                            })
+                            .map_err(|e| e.to_string())?;
                     }
                     DataType::Int64 => {
                         let vals = src.i64_values().unwrap();
                         let nulls = src.null_mask();
-                        for &gi in &indices {
-                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
-                                dst.push(Option::<i64>::None).map_err(|e| e.to_string())?;
-                            } else {
-                                dst.push(vals[gi]).map_err(|e| e.to_string())?;
-                            }
-                        }
+                        indices
+                            .iter()
+                            .try_for_each(|&gi| {
+                                if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                    dst.push(Option::<i64>::None)
+                                } else {
+                                    dst.push(vals[gi])
+                                }
+                            })
+                            .map_err(|e| e.to_string())?;
                     }
                     DataType::Float32 => {
                         let vals = src.f32_values().unwrap();
                         let nulls = src.null_mask();
-                        for &gi in &indices {
-                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
-                                dst.push(Option::<f32>::None).map_err(|e| e.to_string())?;
-                            } else {
-                                dst.push(vals[gi]).map_err(|e| e.to_string())?;
-                            }
-                        }
+                        indices
+                            .iter()
+                            .try_for_each(|&gi| {
+                                if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                    dst.push(Option::<f32>::None)
+                                } else {
+                                    dst.push(vals[gi])
+                                }
+                            })
+                            .map_err(|e| e.to_string())?;
                     }
                     DataType::Float64 => {
                         let vals = src.f64_values().unwrap();
                         let nulls = src.null_mask();
-                        for &gi in &indices {
-                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
-                                dst.push(Option::<f64>::None).map_err(|e| e.to_string())?;
-                            } else {
-                                dst.push(vals[gi]).map_err(|e| e.to_string())?;
-                            }
-                        }
+                        indices
+                            .iter()
+                            .try_for_each(|&gi| {
+                                if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                    dst.push(Option::<f64>::None)
+                                } else {
+                                    dst.push(vals[gi])
+                                }
+                            })
+                            .map_err(|e| e.to_string())?;
                     }
                     DataType::String => {
                         let vals = src.string_values().unwrap();
                         let nulls = src.null_mask();
-                        for &gi in &indices {
-                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
-                                dst.push(Option::<&str>::None).map_err(|e| e.to_string())?;
-                            } else {
-                                dst.push(vals[gi].as_str()).map_err(|e| e.to_string())?;
-                            }
-                        }
+                        indices
+                            .iter()
+                            .try_for_each(|&gi| {
+                                if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                    dst.push(Option::<&str>::None)
+                                } else {
+                                    dst.push(vals[gi].as_str())
+                                }
+                            })
+                            .map_err(|e| e.to_string())?;
                     }
                     DataType::DateTime => {
                         let vals = src.datetime_values().unwrap();
                         let nulls = src.null_mask();
-                        for &gi in &indices {
-                            if nulls.get(gi).map(|b| *b).unwrap_or(false) {
-                                dst.push(crate::col::ColumnValue::DateTime(None))
-                                    .map_err(|e| e.to_string())?;
-                            } else {
-                                dst.push(crate::col::ColumnValue::DateTime(Some(vals[gi])))
-                                    .map_err(|e| e.to_string())?;
-                            }
-                        }
+                        indices
+                            .iter()
+                            .try_for_each(|&gi| {
+                                if nulls.get(gi).map(|b| *b).unwrap_or(false) {
+                                    dst.push(crate::col::ColumnValue::DateTime(None))
+                                } else {
+                                    dst.push(crate::col::ColumnValue::DateTime(Some(vals[gi])))
+                                }
+                            })
+                            .map_err(|e| e.to_string())?;
                     }
                 }
                 data.insert(name.clone(), dst);

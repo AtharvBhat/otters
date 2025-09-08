@@ -444,14 +444,14 @@ fn or_distribute_clauses(a: Plan, b: Plan) -> Plan {
     if b.is_empty() {
         return a;
     }
-    let mut out: Plan = Vec::with_capacity(a.len() * b.len());
-    for ca in &a {
-        for cb in &b {
-            let mut merged = Vec::with_capacity(ca.len() + cb.len());
-            merged.extend_from_slice(ca);
-            merged.extend_from_slice(cb);
-            out.push(merged);
-        }
-    }
-    out
+    a.iter()
+        .flat_map(|ca| {
+            b.iter().map(move |cb| {
+                let mut merged = Vec::with_capacity(ca.len() + cb.len());
+                merged.extend_from_slice(ca);
+                merged.extend_from_slice(cb);
+                merged
+            })
+        })
+        .collect()
 }

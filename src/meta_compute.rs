@@ -196,11 +196,12 @@ pub fn build_row_mask_for_chunk(
     base: usize,
     len: usize,
 ) -> BitVec {
-    let mut candidates = bitvec![1; len];
-    for clause in &compiled.clauses {
-        let mut clause_mask = bitvec![0; len];
-        for leaf in clause {
-            match leaf {
+    compiled
+        .clauses
+        .iter()
+        .fold(bitvec![1; len], |mut acc, clause| {
+            let mut clause_mask = bitvec![0; len];
+            clause.iter().for_each(|leaf| match leaf {
                 ColumnFilter::Numeric { column, cmp, rhs } => {
                     apply_numeric_leaf_row_mask(
                         columns,
@@ -223,11 +224,10 @@ pub fn build_row_mask_for_chunk(
                         &mut clause_mask,
                     );
                 }
-            }
-        }
-        candidates &= clause_mask;
-    }
-    candidates
+            });
+            acc &= clause_mask;
+            acc
+        })
 }
 
 // Leaf helpers for row mask
@@ -299,19 +299,19 @@ fn apply_string_leaf_row_mask(
     if let Some(col) = columns.get(column) {
         let vals = col.string_values().unwrap();
         let nulls = col.null_mask();
-        for off in 0..len {
-            if nulls.get(base + off).map(|b| *b).unwrap_or(false) {
-                continue;
-            }
-            let v = &vals[base + off];
-            let sat = match cmp {
-                CmpOp::Eq => v == rhs,
-                CmpOp::Neq => v != rhs,
-                _ => false,
-            };
-            if sat {
-                clause_mask.set(off, true);
-            }
-        }
+        vals[base..base + len]
+            .iter()
+            .enumerate()
+            .filter(|(off, _)| !nulls.get(base + *off).map(|b| *b).unwrap_or(false))
+            .for_each(|(off, v)| {
+                let sat = match cmp {
+                    CmpOp::Eq => v == rhs,
+                    CmpOp::Neq => v != rhs,
+                    _ => false,
+                };
+                if sat {
+                    clause_mask.set(off, true);
+                }
+            });
     }
 }
