@@ -1,12 +1,12 @@
 [package]
-name = "otters"
+name = "otters-rs"
 version = "0.1.0-alpha1"
 edition = "2024"
 description = "High-performance vector search with metadata filtering"
 license = "MIT"
 repository = "https://github.com/atharvbhat/otters"
 readme = "README.md"
-documentation = "https://docs.rs/otters"
+documentation = "https://docs.rs/otters-rs"
 rust-version = "1.88"
 keywords = ["vector-search", "similarity-search", "semantic-search", "embeddings", "data-science"]
 categories = ["algorithms", "data-structures", "development-tools", "science"]
@@ -20,6 +20,9 @@ include = [
     "README.md",
     "LICENSE",
 ]
+
+[lib]
+name = "otters"
 
 [package.metadata.docs.rs]
 all-features = true

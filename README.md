@@ -1,10 +1,11 @@
 # otters 🦦
 
-[![Crates.io](https://img.shields.io/crates/v/otters.svg)](https://crates.io/crates/otters)
-[![Docs.rs](https://docs.rs/otters/badge.svg)](https://docs.rs/otters)
+[![Crates.io](https://img.shields.io/crates/v/otters-rs.svg)](https://crates.io/crates/otters-rs)
+[![Docs.rs](https://docs.rs/otters-rs/badge.svg)](https://docs.rs/otters-rs)
 [![CI](https://github.com/AtharvBhat/otters/actions/workflows/rust.yml/badge.svg)](https://github.com/AtharvBhat/otters/actions/workflows/rust.yml)
 
 Otters is a minimal, exact vector search library with expressive metadata filtering. Think “Polars for vector search.”
+
 
 Otters targets smaller to mid-size datasets (up to ~10M vectors) where:
 - You want exact results, not approximate indices.
