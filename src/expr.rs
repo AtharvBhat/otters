@@ -76,7 +76,7 @@ pub fn lit<T: Into<Literal>>(v: T) -> Expr {
 }
 
 impl Expr {
-    // Comparison builders; intended to be used with a column on the left
+    // Comparison builders
     pub fn eq<T: Into<Literal>>(self, v: T) -> Expr {
         Expr::Cmp {
             left: Box::new(self),

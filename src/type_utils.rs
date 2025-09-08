@@ -305,46 +305,37 @@ impl u64x8 {
 // SIMD helper functions (8-wide)
 // ==============================
 
-// Macro to generate mask8_rows_* for numeric types with similar semantics.
-// Keep only a macro for f32 (straightforward API); leave other types explicit.
-macro_rules! impl_mask8_rows_f32 {
-    () => {
-        pub fn mask8_rows_f32(
-            vals: &[f32],
-            nulls: &BitVec,
-            base: usize,
-            off: usize,
-            cmp: crate::expr::CmpOp,
-            thr: f32,
-        ) -> u8 {
-            let start = base + off;
-            let v = f32x8::from(&vals[start..start + 8]);
-            let t = f32x8::splat(thr);
-            let m = match cmp {
-                crate::expr::CmpOp::Eq => v.cmp_eq(t),
-                crate::expr::CmpOp::Neq => v.cmp_ne(t),
-                crate::expr::CmpOp::Lt => v.cmp_lt(t),
-                crate::expr::CmpOp::Lte => v.cmp_le(t),
-                crate::expr::CmpOp::Gt => v.cmp_gt(t),
-                crate::expr::CmpOp::Gte => v.cmp_ge(t),
-            };
-            let arr = m.to_array();
-            let mut bits: u8 = 0;
-            for (j, &val) in arr.iter().enumerate() {
-                let ok = val != 0.0;
-                let not_null = !nulls.get(start + j).map(|b| *b).unwrap_or(false);
-                if ok && not_null {
-                    bits |= 1 << j;
-                }
-            }
-            bits
-        }
+pub fn mask8_rows_f32(
+    vals: &[f32],
+    nulls: &BitVec,
+    base: usize,
+    off: usize,
+    cmp: crate::expr::CmpOp,
+    thr: f32,
+) -> u8 {
+    let start = base + off;
+    let v = f32x8::from(&vals[start..start + 8]);
+    let t = f32x8::splat(thr);
+    let m = match cmp {
+        crate::expr::CmpOp::Eq => v.cmp_eq(t),
+        crate::expr::CmpOp::Neq => v.cmp_ne(t),
+        crate::expr::CmpOp::Lt => v.cmp_lt(t),
+        crate::expr::CmpOp::Lte => v.cmp_le(t),
+        crate::expr::CmpOp::Gt => v.cmp_gt(t),
+        crate::expr::CmpOp::Gte => v.cmp_ge(t),
     };
+    let arr = m.to_array();
+    let mut bits: u8 = 0;
+    for (j, &val) in arr.iter().enumerate() {
+        let ok = val != 0.0;
+        let not_null = !nulls.get(start + j).map(|b| *b).unwrap_or(false);
+        if ok && not_null {
+            bits |= 1 << j;
+        }
+    }
+    bits
 }
-impl_mask8_rows_f32!();
 
-// Retain explicit implementations for i32 / branchy logic because of custom handling.
-// (f32 handled by macro above)
 pub fn mask8_rows_i32(
     vals: &[i32],
     nulls: &BitVec,
@@ -594,7 +585,6 @@ pub fn mask8_ranges_i64(
     bits & nn
 }
 
-// High-level typed helpers to apply masks over rows (SIMD + scalar tail)
 #[inline]
 pub fn apply_rows_mask_f32(
     vals: &[f32],
@@ -747,150 +737,7 @@ pub fn apply_rows_mask_i64(
     }
 }
 
-// High-level typed helpers to apply chunk masks from ranges
-#[inline]
-pub fn apply_chunk_mask_ranges_f32(
-    min: &[f32],
-    max: &[f32],
-    non_null: &[usize],
-    n_chunks: usize,
-    cmp: crate::expr::CmpOp,
-    thr: f32,
-    out: &mut [bool],
-) {
-    let mut i = 0;
-    while i + 8 <= n_chunks {
-        let bits = mask8_ranges_f32(min, max, non_null, i, cmp, thr);
-        for j in 0..8 {
-            if (bits >> j) & 1 == 1 {
-                out[i + j] = true;
-            }
-        }
-        i += 8;
-    }
-    while i < n_chunks {
-        let mn = min[i];
-        let mx = max[i];
-        let sat = match cmp {
-            crate::expr::CmpOp::Eq => mn <= thr && thr <= mx,
-            crate::expr::CmpOp::Lt => mn < thr,
-            crate::expr::CmpOp::Lte => mn <= thr,
-            crate::expr::CmpOp::Gt => mx > thr,
-            crate::expr::CmpOp::Gte => mx >= thr,
-            crate::expr::CmpOp::Neq => true,
-        } && non_null[i] > 0;
-        out[i] |= sat;
-        i += 1;
-    }
-}
-
-#[inline]
-pub fn apply_chunk_mask_ranges_f64(
-    min: &[f64],
-    max: &[f64],
-    non_null: &[usize],
-    n_chunks: usize,
-    cmp: crate::expr::CmpOp,
-    thr: f64,
-    out: &mut [bool],
-) {
-    let mut i = 0;
-    while i + 8 <= n_chunks {
-        let bits = mask8_ranges_f64(min, max, non_null, i, cmp, thr);
-        for j in 0..8 {
-            if (bits >> j) & 1 == 1 {
-                out[i + j] = true;
-            }
-        }
-        i += 8;
-    }
-    while i < n_chunks {
-        let mn = min[i];
-        let mx = max[i];
-        let sat = match cmp {
-            crate::expr::CmpOp::Eq => mn <= thr && thr <= mx,
-            crate::expr::CmpOp::Lt => mn < thr,
-            crate::expr::CmpOp::Lte => mn <= thr,
-            crate::expr::CmpOp::Gt => mx > thr,
-            crate::expr::CmpOp::Gte => mx >= thr,
-            crate::expr::CmpOp::Neq => true,
-        } && non_null[i] > 0;
-        out[i] |= sat;
-        i += 1;
-    }
-}
-
-#[inline]
-pub fn apply_chunk_mask_ranges_i32(
-    min: &[i32],
-    max: &[i32],
-    non_null: &[usize],
-    n_chunks: usize,
-    cmp: crate::expr::CmpOp,
-    thr: i32,
-    out: &mut [bool],
-) {
-    let mut i = 0;
-    while i + 8 <= n_chunks {
-        let bits = mask8_ranges_i32(min, max, non_null, i, cmp, thr);
-        for j in 0..8 {
-            if (bits >> j) & 1 == 1 {
-                out[i + j] = true;
-            }
-        }
-        i += 8;
-    }
-    while i < n_chunks {
-        let mn = min[i];
-        let mx = max[i];
-        let sat = match cmp {
-            crate::expr::CmpOp::Eq => mn <= thr && thr <= mx,
-            crate::expr::CmpOp::Lt => mn < thr,
-            crate::expr::CmpOp::Lte => mn <= thr,
-            crate::expr::CmpOp::Gt => mx > thr,
-            crate::expr::CmpOp::Gte => mx >= thr,
-            crate::expr::CmpOp::Neq => true,
-        } && non_null[i] > 0;
-        out[i] |= sat;
-        i += 1;
-    }
-}
-
-#[inline]
-pub fn apply_chunk_mask_ranges_i64(
-    min: &[i64],
-    max: &[i64],
-    non_null: &[usize],
-    n_chunks: usize,
-    cmp: crate::expr::CmpOp,
-    thr: i64,
-    out: &mut [bool],
-) {
-    let mut i = 0;
-    while i + 8 <= n_chunks {
-        let bits = mask8_ranges_i64(min, max, non_null, i, cmp, thr);
-        for j in 0..8 {
-            if (bits >> j) & 1 == 1 {
-                out[i + j] = true;
-            }
-        }
-        i += 8;
-    }
-    while i < n_chunks {
-        let mn = min[i];
-        let mx = max[i];
-        let sat = match cmp {
-            crate::expr::CmpOp::Eq => mn <= thr && thr <= mx,
-            crate::expr::CmpOp::Lt => mn < thr,
-            crate::expr::CmpOp::Lte => mn <= thr,
-            crate::expr::CmpOp::Gt => mx > thr,
-            crate::expr::CmpOp::Gte => mx >= thr,
-            crate::expr::CmpOp::Neq => true,
-        } && non_null[i] > 0;
-        out[i] |= sat;
-        i += 1;
-    }
-}
+// High-level typed helpers write into BitVec variants below; boolean-slice variants removed as unused.
 #[inline]
 pub fn apply_chunk_mask_ranges_f32_bits(
     min: &[f32],

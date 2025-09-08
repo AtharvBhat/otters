@@ -95,7 +95,6 @@ impl fmt::Display for AsciiTable {
 
 /// Pretty-print the head of a MetaStore as an ASCII table.
 pub fn metastore_head(meta: &MetaStore, n: usize) -> String {
-    // Gather stable, sorted column names
     let mut cols: Vec<String> = meta.schema().keys().cloned().collect();
     cols.sort();
 
@@ -103,7 +102,7 @@ pub fn metastore_head(meta: &MetaStore, n: usize) -> String {
     let total_rows = meta.columns().values().next().map(|c| c.len()).unwrap_or(0);
     let limit = total_rows.min(n);
 
-    // Build headers: index + each column
+    // Build headers
     let mut headers: Vec<String> = Vec::with_capacity(cols.len() + 1);
     headers.push("index".to_string());
     headers.extend(cols.iter().cloned());

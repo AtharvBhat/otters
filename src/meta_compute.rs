@@ -127,7 +127,6 @@ pub fn build_zone_stat_for_range(
     }
 }
 
-// Internal per-chunk container used by MetaStore queries
 #[derive(Debug)]
 pub struct MetaChunk {
     pub base_offset: usize,
@@ -136,7 +135,6 @@ pub struct MetaChunk {
     pub stats: HashMap<String, ZoneStat>,
 }
 
-// Internal aggregation bucket for per-chunk processing
 #[derive(Default)]
 pub struct ChunkAgg {
     pub results: Vec<(usize, f32)>,
@@ -145,8 +143,8 @@ pub struct ChunkAgg {
     pub compared: usize,
 }
 
-// Process a single chunk: run per-chunk VecStore query, apply optional row-level meta filter,
-// and collect results and counters. Designed to be called in parallel.
+// Process a single chunk: run per-chunk VecStore query, apply row-level meta filter,
+// and collect results and counters
 #[allow(clippy::too_many_arguments)]
 pub fn process_chunk(
     chunk: &MetaChunk,
@@ -164,7 +162,6 @@ pub fn process_chunk(
         compared: chunk.len * queries.len(),
     };
 
-    // Build SIMD row mask if meta filter present
     let row_mask_opt: Option<BitVec> =
         meta_filter.map(|cf| build_row_mask_for_chunk(cf, columns, chunk.base_offset, chunk.len));
 

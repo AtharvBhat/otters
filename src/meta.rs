@@ -92,7 +92,7 @@ impl MetaStoreBuilder {
     pub fn with_bloom_fpr(mut self, fpr: f64) -> Self {
         // Clamp to sane bounds, fallback to default when non-finite
         let f = if fpr.is_finite() {
-            fpr.clamp(1e-12, 0.5)
+            fpr.clamp(1e-2, 0.5)
         } else {
             0.01
         };
@@ -126,7 +126,7 @@ impl MetaStoreBuilder {
         Ok(self)
     }
 
-    // Supply multiple fully-built columns; validates against schema
+    // Supply multiple fully-built columns and validates against schema
     pub fn with_columns(mut self, columns: Vec<(String, Column)>) -> Result<Self, String> {
         for (name, col) in columns {
             let expected = *self
@@ -154,7 +154,7 @@ impl MetaStoreBuilder {
 
         let n_rows = vectors.len();
 
-        // Enforce: every column in schema must be present and have the same length as vectors
+        // every column in schema must be present and have the same length as vectors
         for name in self.schema.keys() {
             let col = self
                 .columns
@@ -191,13 +191,11 @@ impl MetaStoreBuilder {
         let mut vectors_ingest_duration = Duration::default();
         let mut zonemap_build_duration = Duration::default();
 
-        // Prepare packed per-chunk ranges for SIMD-friendly filtering
         let mut packed_ranges_f64: HashMap<String, PackedRanges<f64>> = HashMap::new();
         let mut packed_ranges_i64: HashMap<String, PackedRanges<i64>> = HashMap::new();
         let mut packed_ranges_f32: HashMap<String, PackedRanges<f32>> = HashMap::new();
         let mut packed_ranges_i32: HashMap<String, PackedRanges<i32>> = HashMap::new();
 
-        // Build chunks without cloning vectors: consume the owned vectors in chunked groups
         let mut chunks: Vec<MetaChunk> = Vec::new();
         let mut base_offset = 0usize;
         for chunk_iter in &vectors.into_iter().chunks(self.chunk_size) {
@@ -211,7 +209,7 @@ impl MetaStoreBuilder {
             vs.add_vectors(chunk_vecs)?;
             vectors_ingest_duration += ingest_start.elapsed();
 
-            let end = base_offset + vs.len(); // length of this chunk
+            let end = base_offset + vs.len();
 
             // Build stats for this chunk
             let zstart = Instant::now();
@@ -305,10 +303,7 @@ impl MetaStoreBuilder {
     }
 }
 
-// build_zone_stat_for_range moved to meta_compute.rs
-
 impl MetaStore {
-    /// Lightweight constructor for empty columns; primarily for demos.
     pub fn new(schema: &[(String, DataType)]) -> Self {
         let schema_map = HashMap::from_iter(schema.iter().cloned());
         let columns = HashMap::from_iter(
@@ -330,19 +325,6 @@ impl MetaStore {
         }
     }
 
-    /// Start a builder using fully-populated columns.
-    ///
-    /// Column names and dtypes are inferred directly from each `Column`.
-    /// If duplicate names are provided, the last one wins.
-    /// Prefer `from_columns` for the most ergonomic construction.
-    pub fn builder_from_columns(columns: Vec<Column>) -> MetaStoreBuilder {
-        Self::from_columns(columns)
-    }
-
-    /// Start a builder using fully-populated columns.
-    ///
-    /// Column names and dtypes are inferred directly from each `Column`.
-    /// If duplicate names are provided, the last one wins.
     pub fn from_columns(columns: Vec<Column>) -> MetaStoreBuilder {
         let mut schema = HashMap::new();
         let mut col_map = HashMap::new();
@@ -360,7 +342,6 @@ impl MetaStore {
         }
     }
 
-    /// Start a builder by schema; you should supply filled columns via `with_columns`.
     pub fn from_schema(schema: &[(String, DataType)]) -> MetaStoreBuilder {
         let mut schema_map = HashMap::new();
         let mut columns = HashMap::new();
@@ -408,7 +389,7 @@ impl MetaStore {
         self.build_stats.clone()
     }
 
-    // Build a per-chunk mask for the compiled plan using packed ranges and SIMD, mirroring
+    // Build a per-chunk mask for the compiled plan
     // the pruning logic used during query planning. True indicates the chunk may satisfy the plan.
     fn build_chunk_mask_for_plan(&self, compiled: &CompiledFilter) -> BitVec {
         let n_chunks = self.chunks.len();
@@ -582,8 +563,6 @@ impl MetaStore {
     }
 }
 
-// compute helpers moved to meta_compute.rs
-
 #[derive(Debug)]
 pub struct MetaQueryPlan<'a> {
     store: &'a MetaStore,
@@ -593,10 +572,7 @@ pub struct MetaQueryPlan<'a> {
     vec_filter: Option<(f32, VecCmp)>,
     take_type: Option<TakeType>,
     take_count: Option<usize>,
-    // stats are always captured now
 }
-
-// compute helpers moved to meta_compute.rs
 
 impl<'a> MetaQueryPlan<'a> {
     fn new(store: &'a MetaStore, queries: Vec<Vec<f32>>, metric: Metric) -> Self {
@@ -633,16 +609,11 @@ impl<'a> MetaQueryPlan<'a> {
         self
     }
 
-    // take_global removed; single merged result is always returned
-
-    // parallel is always on; no with_parallel needed
-
     pub fn collect(self) -> Result<MetaQueryResults, String> {
         let total_start = Instant::now();
-        let k = self.take_count.unwrap_or_else(|| {
-            // default: number of rows across store
-            self.store.chunks.iter().map(|c| c.len).sum()
-        });
+        let k = self
+            .take_count
+            .unwrap_or_else(|| self.store.chunks.iter().map(|c| c.len).sum());
         let take_type = self.take_type.unwrap_or(match self.metric {
             Metric::Euclidean => TakeType::Min,
             _ => TakeType::Max,
@@ -672,10 +643,8 @@ impl<'a> MetaQueryPlan<'a> {
         let evaluated_chunks = candidate_chunks.len();
         let pruned_chunks = total_chunks - evaluated_chunks;
         let mut vectors_compared: usize = 0;
-        // No separate pre/post row counters because filtering is pushed down
 
         let score_start = Instant::now();
-        // Extract inputs once
         let metric_ref = &self.metric;
         let queries_ref = &self.queries;
         let vec_filter_opt = self.vec_filter.clone();
@@ -726,7 +695,7 @@ impl<'a> MetaQueryPlan<'a> {
             total_duration,
         };
         *self.store.last_stats.borrow_mut() = Some(stats);
-        // Build result columns (typed) and collect indices/scores in result order
+        // Build result columns and collect indices/scores in result order
         let mut col_names: Vec<String> = self.store.schema.keys().cloned().collect();
         col_names.sort();
 

@@ -49,9 +49,6 @@ pub fn euclidean_distance_squared(vec1: &[f32], vec2: &[f32]) -> f32 {
             .sum::<f32>()
 }
 
-// calculate_scores_chunk (vector-of-vectors) removed; flat buffer variant is used in VecStore
-
-// Calculate scores for all queries for a chunk of 8 vectors in a flat (row-major) buffer
 #[inline(always)]
 pub fn calculate_scores_chunk_flat(
     queries: &[Vec<f32>],
@@ -183,8 +180,6 @@ impl<'a> TopKCollector<'a> {
             }
         }
     }
-
-    // push_chunk removed; use push_chunk_masked or push_scalars
 
     // Like push_chunk, but also applies an optional row mask for the 8-lane block
     pub fn push_chunk_masked(
