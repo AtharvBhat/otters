@@ -1,4 +1,4 @@
-use crate::meta::{MetaBuildStats, MetaQueryResults, MetaStore, MetaQueryStats};
+use crate::meta::{MetaBuildStats, MetaQueryResults, MetaQueryStats, MetaStore};
 use crate::type_utils::DataType;
 use chrono::DateTime;
 use std::fmt;
@@ -12,7 +12,11 @@ pub struct AsciiTable {
 
 impl AsciiTable {
     pub fn new(headers: Vec<String>, rows: Vec<Vec<String>>) -> Self {
-        Self { headers, rows, title: None }
+        Self {
+            headers,
+            rows,
+            title: None,
+        }
     }
 
     pub fn with_title(mut self, title: String) -> Self {
@@ -96,12 +100,7 @@ pub fn metastore_head(meta: &MetaStore, n: usize) -> String {
     cols.sort();
 
     // Determine row count
-    let total_rows = meta
-        .columns()
-        .values()
-        .next()
-        .map(|c| c.len())
-        .unwrap_or(0);
+    let total_rows = meta.columns().values().next().map(|c| c.len()).unwrap_or(0);
     let limit = total_rows.min(n);
 
     // Build headers: index + each column
@@ -116,19 +115,19 @@ pub fn metastore_head(meta: &MetaStore, n: usize) -> String {
         row.push(i.to_string());
         for name in &cols {
             if let Some(col) = meta.columns().get(name) {
-                let is_null = col
-                    .null_mask()
-                    .get(i)
-                    .map(|b| *b)
-                    .unwrap_or(false);
+                let is_null = col.null_mask().get(i).map(|b| *b).unwrap_or(false);
                 if is_null {
                     row.push("NULL".to_string());
                 } else {
                     let cell = match col.dtype() {
                         DataType::Int32 => col.i32_values().map(|v| v[i].to_string()).unwrap(),
                         DataType::Int64 => col.i64_values().map(|v| v[i].to_string()).unwrap(),
-                        DataType::Float32 => col.f32_values().map(|v| format!("{:.4}", v[i])).unwrap(),
-                        DataType::Float64 => col.f64_values().map(|v| format!("{:.4}", v[i])).unwrap(),
+                        DataType::Float32 => {
+                            col.f32_values().map(|v| format!("{:.4}", v[i])).unwrap()
+                        }
+                        DataType::Float64 => {
+                            col.f64_values().map(|v| format!("{:.4}", v[i])).unwrap()
+                        }
                         DataType::String => col.string_values().map(|v| v[i].clone()).unwrap(),
                         DataType::DateTime => col
                             .datetime_values()
@@ -165,22 +164,25 @@ impl fmt::Display for MetaQueryResults {
 
         let mut rows: Vec<Vec<String>> = Vec::with_capacity(self.len());
         for i in 0..self.len() {
-            let mut line = vec![self.indices[i].to_string(), format!("{:.6}", self.scores[i])];
+            let mut line = vec![
+                self.indices[i].to_string(),
+                format!("{:.6}", self.scores[i]),
+            ];
             for c in &self.columns {
                 if let Some(col) = self.data.get(c) {
-                    let is_null = col
-                        .null_mask()
-                        .get(i)
-                        .map(|b| *b)
-                        .unwrap_or(false);
+                    let is_null = col.null_mask().get(i).map(|b| *b).unwrap_or(false);
                     if is_null {
                         line.push("NULL".to_string());
                     } else {
                         let cell = match col.dtype() {
                             DataType::Int32 => col.i32_values().map(|v| v[i].to_string()).unwrap(),
                             DataType::Int64 => col.i64_values().map(|v| v[i].to_string()).unwrap(),
-                            DataType::Float32 => col.f32_values().map(|v| format!("{:.4}", v[i])).unwrap(),
-                            DataType::Float64 => col.f64_values().map(|v| format!("{:.4}", v[i])).unwrap(),
+                            DataType::Float32 => {
+                                col.f32_values().map(|v| format!("{:.4}", v[i])).unwrap()
+                            }
+                            DataType::Float64 => {
+                                col.f64_values().map(|v| format!("{:.4}", v[i])).unwrap()
+                            }
                             DataType::String => col.string_values().map(|v| v[i].clone()).unwrap(),
                             DataType::DateTime => col
                                 .datetime_values()
@@ -244,10 +246,22 @@ pub fn format_query_stats(s: &MetaQueryStats) -> String {
         vec!["pruned_chunks".into(), s.pruned_chunks.to_string()],
         vec!["evaluated_chunks".into(), s.evaluated_chunks.to_string()],
         vec!["vectors_compared".into(), s.vectors_compared.to_string()],
-        vec!["prune_ms".into(), format!("{:.3}", s.prune_duration.as_secs_f64() * 1000.0)],
-        vec!["score_ms".into(), format!("{:.3}", s.score_duration.as_secs_f64() * 1000.0)],
-        vec!["merge_ms".into(), format!("{:.3}", s.merge_duration.as_secs_f64() * 1000.0)],
-        vec!["total_ms".into(), format!("{:.3}", s.total_duration.as_secs_f64() * 1000.0)],
+        vec![
+            "prune_ms".into(),
+            format!("{:.3}", s.prune_duration.as_secs_f64() * 1000.0),
+        ],
+        vec![
+            "score_ms".into(),
+            format!("{:.3}", s.score_duration.as_secs_f64() * 1000.0),
+        ],
+        vec![
+            "merge_ms".into(),
+            format!("{:.3}", s.merge_duration.as_secs_f64() * 1000.0),
+        ],
+        vec![
+            "total_ms".into(),
+            format!("{:.3}", s.total_duration.as_secs_f64() * 1000.0),
+        ],
     ];
     AsciiTable::new(headers, rows)
         .with_title("Last Meta Query Stats".to_string())

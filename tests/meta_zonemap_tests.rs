@@ -18,7 +18,17 @@ fn build_store() -> MetaStore {
     let vectors: Vec<Vec<f32>> = (0..9).map(|_| vec![1.0, 0.0]).collect(); // dummy vectors
 
     let val = Column::new("val", DataType::Int32)
-        .from(vec![Some(1), Some(2), None, Some(10), Some(11), Some(12), None, None, None])
+        .from(vec![
+            Some(1),
+            Some(2),
+            None,
+            Some(10),
+            Some(11),
+            Some(12),
+            None,
+            None,
+            None,
+        ])
         .unwrap();
 
     let ts = Column::new("ts", DataType::DateTime)
@@ -50,10 +60,10 @@ fn build_store() -> MetaStore {
         .unwrap();
 
     MetaStore::from_columns(vec![val, ts, grade])
-    .with_vectors(vectors)
-    .with_chunk_size(3)
-    .build()
-    .unwrap()
+        .with_vectors(vectors)
+        .with_chunk_size(3)
+        .build()
+        .unwrap()
 }
 
 #[test]
@@ -130,17 +140,17 @@ fn zonemap_and_clause_numeric_datetime() {
     // (val > 5) AND (ts < 2025-01-01) should yield only row 5 (val=12, ts=2024-12-31.. )
     let results = store
         .query(vec![1.0, 0.0], Metric::DotProduct)
-        .meta_filter(
-            col("val")
-                .gt(5)
-                .and(col("ts").lt("2025-01-01T00:00:00Z")),
-        )
+        .meta_filter(col("val").gt(5).and(col("ts").lt("2025-01-01T00:00:00Z")))
         .unwrap()
         .take(9)
         .collect()
         .unwrap();
 
-    assert_eq!(results.len(), 1, "Exactly one row should satisfy both predicates");
+    assert_eq!(
+        results.len(),
+        1,
+        "Exactly one row should satisfy both predicates"
+    );
     assert_eq!(results.indices[0], 5);
 
     let stats = store.last_query_stats().unwrap();
@@ -163,5 +173,8 @@ fn zonemap_ne_comparator_with_null_only_chunk() {
         .unwrap();
     let stats = store.last_query_stats().unwrap();
     assert_eq!(stats.total_chunks, 3);
-    assert!(stats.pruned_chunks >= 1, "Null-only chunk should not survive Neq pruning");
+    assert!(
+        stats.pruned_chunks >= 1,
+        "Null-only chunk should not survive Neq pruning"
+    );
 }

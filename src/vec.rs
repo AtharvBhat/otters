@@ -21,7 +21,6 @@ pub enum TakeType {
     Max,
 }
 
-
 #[derive(Debug, Clone)]
 pub enum Cmp {
     Lt,
@@ -49,7 +48,10 @@ impl std::fmt::Display for SearchResult {
 
 impl From<(usize, f32)> for SearchResult {
     fn from(t: (usize, f32)) -> Self {
-        SearchResult { index: t.0, score: t.1 }
+        SearchResult {
+            index: t.0,
+            score: t.1,
+        }
     }
 }
 
@@ -147,11 +149,17 @@ impl<'a> VecQueryPlan<'a> {
         self.map_ok(|s| s.filter_criteria = Some((score, cmp)))
     }
 
-    pub fn take(self, count: usize) -> Self { self.take_with_options(count, None) }
+    pub fn take(self, count: usize) -> Self {
+        self.take_with_options(count, None)
+    }
 
-    pub fn take_min(self, count: usize) -> Self { self.take_with_options(count, Some(TakeType::Min)) }
+    pub fn take_min(self, count: usize) -> Self {
+        self.take_with_options(count, Some(TakeType::Min))
+    }
 
-    pub fn take_max(self, count: usize) -> Self { self.take_with_options(count, Some(TakeType::Max)) }
+    pub fn take_max(self, count: usize) -> Self {
+        self.take_with_options(count, Some(TakeType::Max))
+    }
 
     fn validate(&self) -> Result<(), String> {
         if let Some(ref error) = self.error {
@@ -200,7 +208,8 @@ impl<'a> VecQueryPlan<'a> {
         let _num_queries = query_vectors.len();
 
         // Single global collector aggregating across all queries
-        let mut collector = TopKCollector::new(take_count, take_type, self.filter_criteria.as_ref());
+        let mut collector =
+            TopKCollector::new(take_count, take_type, self.filter_criteria.as_ref());
 
         // Process chunks: 8 rows per block
         let full_chunks = vector_store.n_vecs / 8;
@@ -270,13 +279,11 @@ impl<'a> VecQueryPlan<'a> {
         }
 
         // Return results
-        Ok(
-            collector
-                .into_sorted_vec()
-                .into_iter()
-                .map(SearchResult::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(collector
+            .into_sorted_vec()
+            .into_iter()
+            .map(SearchResult::from)
+            .collect::<Vec<_>>())
     }
 }
 
@@ -369,7 +376,7 @@ impl VecStore {
             filter_criteria: None,
             take_type: None,
             take_count: None,
-            
+
             vector_store: Some(self),
             error: None,
             row_mask: None,

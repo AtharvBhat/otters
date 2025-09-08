@@ -120,9 +120,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate accessing result contents: print heads of result columns
     println!("\n=== Access result columns (head) ===");
-    if let Some(col) = meta_results.column("name") { col.head(); }
-    if let Some(col) = meta_results.column("price") { col.head(); }
-    if let Some(col) = meta_results.column("version") { col.head(); }
+    if let Some(col) = meta_results.column("name") {
+        col.head();
+    }
+    if let Some(col) = meta_results.column("price") {
+        col.head();
+    }
+    if let Some(col) = meta_results.column("version") {
+        col.head();
+    }
 
     Ok(())
 }

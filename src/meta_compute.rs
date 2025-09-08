@@ -203,12 +203,24 @@ pub fn build_row_mask_for_chunk(
             match leaf {
                 ColumnFilter::Numeric { column, cmp, rhs } => {
                     apply_numeric_leaf_row_mask(
-                        columns, base, len, column, *cmp, rhs, &mut clause_mask,
+                        columns,
+                        base,
+                        len,
+                        column,
+                        *cmp,
+                        rhs,
+                        &mut clause_mask,
                     );
                 }
                 ColumnFilter::String { column, cmp, rhs } => {
                     apply_string_leaf_row_mask(
-                        columns, base, len, column, *cmp, rhs, &mut clause_mask,
+                        columns,
+                        base,
+                        len,
+                        column,
+                        *cmp,
+                        rhs,
+                        &mut clause_mask,
                     );
                 }
             }

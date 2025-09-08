@@ -5,10 +5,8 @@ pub mod prelude;
 pub mod type_utils;
 pub mod vec;
 
+mod display;
 mod meta_compute;
 mod vec_compute;
-mod display;
 
-pub use crate::meta_compute::{
-    BloomBuild, ZoneStat, build_zone_stat_for_range,
-};
+pub use crate::meta_compute::{BloomBuild, ZoneStat, build_zone_stat_for_range};

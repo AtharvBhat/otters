@@ -29,11 +29,16 @@ pub struct MetaQueryResults {
 }
 
 impl MetaQueryResults {
-    pub fn len(&self) -> usize { self.indices.len() }
-    pub fn is_empty(&self) -> bool { self.indices.is_empty() }
-    pub fn column(&self, name: &str) -> Option<&Column> { self.data.get(name) }
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+    pub fn column(&self, name: &str) -> Option<&Column> {
+        self.data.get(name)
+    }
 }
-
 
 #[derive(Debug, Clone, Copy)]
 pub enum BloomConfig {
@@ -85,7 +90,11 @@ impl MetaStoreBuilder {
     /// Configure bloom filter by target false-positive rate (0 < fpr < 1).
     pub fn with_bloom_fpr(mut self, fpr: f64) -> Self {
         // Clamp to sane bounds, fallback to default when non-finite
-        let f = if fpr.is_finite() { fpr.clamp(1e-12, 0.5) } else { 0.01 };
+        let f = if fpr.is_finite() {
+            fpr.clamp(1e-12, 0.5)
+        } else {
+            0.01
+        };
         self.bloom = BloomConfig::Fpr(f);
         self
     }
@@ -376,17 +385,27 @@ impl MetaStore {
         }
     }
 
-    pub fn head(&self) { self.head_n(5) }
+    pub fn head(&self) {
+        self.head_n(5)
+    }
 
     pub fn head_n(&self, n: usize) {
         println!("{}", crate::display::metastore_head(self, n));
     }
 
     // Accessors for display helpers
-    pub fn schema(&self) -> &HashMap<String, DataType> { &self.schema }
-    pub fn columns(&self) -> &HashMap<String, Column> { &self.columns }
-    pub fn n_chunks(&self) -> usize { self.chunks.len() }
-    pub fn chunk_size(&self) -> usize { self.chunk_size }
+    pub fn schema(&self) -> &HashMap<String, DataType> {
+        &self.schema
+    }
+    pub fn columns(&self) -> &HashMap<String, Column> {
+        &self.columns
+    }
+    pub fn n_chunks(&self) -> usize {
+        self.chunks.len()
+    }
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
 
     pub fn last_query_stats(&self) -> Option<MetaQueryStats> {
         self.last_stats.borrow().clone()
@@ -792,9 +811,11 @@ impl<'a> MetaQueryPlan<'a> {
                         let nulls = src.null_mask();
                         for &gi in &indices {
                             if nulls.get(gi).map(|b| *b).unwrap_or(false) {
-                                dst.push(crate::col::ColumnValue::DateTime(None)).map_err(|e| e.to_string())?;
+                                dst.push(crate::col::ColumnValue::DateTime(None))
+                                    .map_err(|e| e.to_string())?;
                             } else {
-                                dst.push(crate::col::ColumnValue::DateTime(Some(vals[gi]))).map_err(|e| e.to_string())?;
+                                dst.push(crate::col::ColumnValue::DateTime(Some(vals[gi])))
+                                    .map_err(|e| e.to_string())?;
                             }
                         }
                     }
@@ -803,7 +824,12 @@ impl<'a> MetaQueryPlan<'a> {
             }
         }
 
-        Ok(MetaQueryResults { columns: col_names, data, indices, scores })
+        Ok(MetaQueryResults {
+            columns: col_names,
+            data,
+            indices,
+            scores,
+        })
     }
 }
 

@@ -585,7 +585,11 @@ fn test_global_vs_local_scope() {
         .collect()
         .unwrap();
     assert_eq!(local_results.len(), 2);
-    let global_results = store.query(queries, Metric::Cosine).take(3).collect().unwrap();
+    let global_results = store
+        .query(queries, Metric::Cosine)
+        .take(3)
+        .collect()
+        .unwrap();
     assert_eq!(global_results.len(), 3);
 }
 
@@ -681,16 +685,32 @@ fn test_cosine_similarity_correctness() {
         let sim = r.score;
         if (sim - 1.0).abs() < 1e-6 {
             found_parallel = true;
-            assert_eq!(r.index, 0, "Parallel vector should be at index 0, got {}", r.index);
+            assert_eq!(
+                r.index, 0,
+                "Parallel vector should be at index 0, got {}",
+                r.index
+            );
         } else if (sim - (-1.0)).abs() < 1e-6 {
             found_anti_parallel = true;
-            assert_eq!(r.index, 1, "Anti-parallel vector should be at index 1, got {}", r.index);
+            assert_eq!(
+                r.index, 1,
+                "Anti-parallel vector should be at index 1, got {}",
+                r.index
+            );
         } else if sim.abs() < 1e-6 {
             found_orthogonal = true;
-            assert_eq!(r.index, 2, "Orthogonal vector should be at index 2, got {}", r.index);
+            assert_eq!(
+                r.index, 2,
+                "Orthogonal vector should be at index 2, got {}",
+                r.index
+            );
         } else if (sim - (1.0 / 2.0_f32.sqrt())).abs() < 1e-5 {
             found_45deg = true;
-            assert_eq!(r.index, 3, "45° vector should be at index 3, got {}", r.index);
+            assert_eq!(
+                r.index, 3,
+                "45° vector should be at index 3, got {}",
+                r.index
+            );
         }
     }
 
@@ -739,23 +759,23 @@ fn test_euclidean_distance_correctness() {
 
     // Verify mathematical correctness (squared distances)
     assert!(
-    identical.score.abs() < 1e-6,
+        identical.score.abs() < 1e-6,
         "Identical vectors should have distance 0"
     );
     assert!(
-    (triangle.score - 25.0).abs() < 1e-6,
+        (triangle.score - 25.0).abs() < 1e-6,
         "3-4-5 triangle should have squared distance 25"
     );
     assert!(
-    (diagonal.score - 2.0).abs() < 1e-6,
+        (diagonal.score - 2.0).abs() < 1e-6,
         "Unit diagonal should have squared distance 2"
     );
     assert!(
-    (vertical.score - 25.0).abs() < 1e-6,
+        (vertical.score - 25.0).abs() < 1e-6,
         "Vertical distance 5 should have squared distance 25"
     );
     assert!(
-    (negative.score - 25.0).abs() < 1e-6,
+        (negative.score - 25.0).abs() < 1e-6,
         "Negative coordinates should have squared distance 25"
     );
 }
@@ -1399,11 +1419,7 @@ fn test_error_states_in_chained_operations() {
     let plan = store.query(query, Metric::Cosine);
 
     // Chain operations - they should all propagate the error
-    let final_plan = plan
-        .filter(0.5, Cmp::Gt)
-        .take(5)
-        .take_min(2)
-        .take_max(1);
+    let final_plan = plan.filter(0.5, Cmp::Gt).take(5).take_min(2).take_max(1);
 
     let result = final_plan.collect();
     assert!(result.is_err());
