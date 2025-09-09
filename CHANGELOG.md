@@ -1,5 +1,8 @@
 ## Changelog
 
+### 0.1.0-alpha3 - 2025-09-08
+- Update Docs  
+
 ### 0.1.0-alpha2 - 2025-09-08
 - MetaQueryPlan::meta_filter now returns Self instead of Result<Self, String>.
     - Any compile error from the expression is deferred and returned by collect().

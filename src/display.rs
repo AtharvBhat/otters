@@ -1,3 +1,7 @@
+//! Lightweight ASCII table rendering for human-friendly output
+//!
+//! Internal helpers used to format MetaStore heads, query results, and stats
+//! as compact tables for examples and demos.
 use crate::col::Column;
 use crate::meta::{MetaBuildStats, MetaQueryResults, MetaQueryStats, MetaStore};
 use crate::type_utils::DataType;

@@ -1,11 +1,7 @@
-//! Prelude module for the otters crate.
+//! Convenient re-exports for common types and functions
 //!
-//! This module re-exports the most commonly used items from the otters crate,
-//! allowing users to quickly import everything they need with:
-//!
-//! ```rust
-//! use otters::prelude::*;
-//! ```
+//! Import everything you typically need with:
+//! `use otters::prelude::*;`.
 
 // Main data structures and query types
 pub use crate::vec::{QueryBatch, VecQueryPlan, VecStore};

@@ -200,8 +200,6 @@ let e3 = col("grade").eq("A") | col("grade").eq("B");
 ## Status and stability
 
 This project is early-stage. Expect frequent breaking changes
-- Current pre-release: 0.1.0-alpha1.
-- MSRV: 1.88.
 
 ## Roadmap
 - Test with real datasets

@@ -1,3 +1,7 @@
+//! Low-level SIMD kernels for vector math and top-k selection
+//!
+//! Internal building blocks used by `vec` module: dot product, cosine,
+//! squared euclidean, and small helpers for filtering and top-k.
 use crate::vec::{Cmp, TakeType};
 use wide::*;
 

@@ -1,10 +1,8 @@
-//! Metadata-enhanced vector search with chunked zone-map pruning.
+//! Vector search with metadata pruning (MetaStore)
 //!
-//! The `MetaStore` couples a `VecStore` per chunk with auxiliary per-column
-//! zonemap statistics (min/max/null counts and light bloom filters) to prune
-//! irrelevant chunks before performing expensive vector similarity scoring.
-//! Queries can apply both metadata expressions and vector similarity filters
-//! with optional per-query or global top-k consolidation.
+//! Chunks vectors, builds per-column zonemaps (min/max/nulls and small Bloom
+//! filters), and uses them to prune work before running SIMD scoring. Supports
+//! combining metadata expressions with vector filters and top‑k selection.
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -78,17 +76,19 @@ struct PackedRanges<T> {
 }
 
 impl MetaStoreBuilder {
+    /// Supply vectors to build the store (row-major f32 per vector).
     pub fn with_vectors(mut self, vectors: Vec<Vec<f32>>) -> Self {
         self.vectors = Some(vectors);
         self
     }
 
+    /// Set the chunk size used for pruning granularity.
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size.max(1);
         self
     }
 
-    /// Configure bloom filter by target false-positive rate (0 < fpr < 1).
+    /// Configure Bloom filters by false-positive rate.
     pub fn with_bloom_fpr(mut self, fpr: f64) -> Self {
         // Clamp to sane bounds, fallback to default when non-finite
         let f = if fpr.is_finite() {
@@ -102,6 +102,7 @@ impl MetaStoreBuilder {
 
     /// Configure bloom filter by total number of bits.
     /// Use this to size the filter explicitly (e.g. 1024, 4096, ...).
+    /// Configure Bloom filters by explicit size in bits.
     pub fn with_bloom_bits(mut self, bits: usize) -> Self {
         let b = bits.max(64); // minimal sane floor
         self.bloom = BloomConfig::Bits(b);
@@ -146,6 +147,7 @@ impl MetaStoreBuilder {
         Ok(self)
     }
 
+    /// Finalize the builder and construct a `MetaStore`.
     pub fn build(self) -> Result<MetaStore, String> {
         // Validate vectors/columns lengths
         let vectors = self
@@ -304,6 +306,7 @@ impl MetaStoreBuilder {
 }
 
 impl MetaStore {
+    /// Create an empty MetaStore from a `(name, DataType)` schema.
     pub fn new(schema: &[(String, DataType)]) -> Self {
         let schema_map = HashMap::from_iter(schema.iter().cloned());
         let columns = HashMap::from_iter(
@@ -325,6 +328,7 @@ impl MetaStore {
         }
     }
 
+    /// Start a builder from fully-constructed columns.
     pub fn from_columns(columns: Vec<Column>) -> MetaStoreBuilder {
         let mut schema = HashMap::new();
         let mut col_map = HashMap::new();
@@ -342,6 +346,7 @@ impl MetaStore {
         }
     }
 
+    /// Start a builder from a schema; columns default to empty.
     pub fn from_schema(schema: &[(String, DataType)]) -> MetaStoreBuilder {
         let mut schema_map = HashMap::new();
         let mut columns = HashMap::new();
@@ -358,33 +363,41 @@ impl MetaStore {
         }
     }
 
+    /// Print a small head preview (first 5 rows) as an ASCII table.
     pub fn head(&self) {
         self.head_n(5)
     }
 
+    /// Print the first `n` rows as an ASCII table.
     pub fn head_n(&self, n: usize) {
         println!("{}", crate::display::metastore_head(self, n));
     }
 
     // Accessors for display helpers
+    /// Access the schema map.
     pub fn schema(&self) -> &HashMap<String, DataType> {
         &self.schema
     }
+    /// Access the backing columns.
     pub fn columns(&self) -> &HashMap<String, Column> {
         &self.columns
     }
+    /// Number of chunks in the store.
     pub fn n_chunks(&self) -> usize {
         self.chunks.len()
     }
+    /// Configured chunk size.
     pub fn chunk_size(&self) -> usize {
         self.chunk_size
     }
 
+    /// Stats from the most recent query, if any.
     pub fn last_query_stats(&self) -> Option<MetaQueryStats> {
         self.last_stats.borrow().clone()
     }
 
     /// Return build-time stats captured when the MetaStore was constructed.
+    /// Build-time stats captured during construction.
     pub fn build_stats(&self) -> Option<MetaBuildStats> {
         self.build_stats.clone()
     }
@@ -530,7 +543,7 @@ impl MetaStore {
         }
     }
 
-    /// Print only build stats as an ASCII table.
+    /// Print build-time stats as a table.
     pub fn print_build_stats(&self) {
         match &self.build_stats {
             Some(b) => println!("{}", crate::display::format_build_stats(b)),
@@ -538,7 +551,7 @@ impl MetaStore {
         }
     }
 
-    /// Print only the last query stats as an ASCII table.
+    /// Print the last query stats as a table.
     pub fn print_last_query_stats(&self) {
         match self.last_query_stats() {
             Some(s) => println!("{}", crate::display::format_query_stats(&s)),
@@ -546,18 +559,18 @@ impl MetaStore {
         }
     }
 
-    /// Backwards-compatible combined stats printer (build + last query)
+    /// Print build and last query stats.
     pub fn print_last_stats(&self) {
         self.print_build_stats();
         self.print_last_query_stats();
     }
 
-    /// Begin a query plan over this MetaStore with a single query vector
+    /// Start a query with a single vector and metric.
     pub fn query(&self, query: Vec<f32>, metric: Metric) -> MetaQueryPlan<'_> {
         MetaQueryPlan::new(self, vec![query], metric)
     }
 
-    /// Begin a query plan with multiple query vectors
+    /// Start a query with multiple vectors.
     pub fn query_batch(&self, queries: Vec<Vec<f32>>, metric: Metric) -> MetaQueryPlan<'_> {
         MetaQueryPlan::new(self, queries, metric)
     }
@@ -569,7 +582,6 @@ pub struct MetaQueryPlan<'a> {
     queries: Vec<Vec<f32>>,
     metric: Metric,
     meta_filter: Option<CompiledFilter>,
-    // If meta_filter expr compilation fails, store the error here and surface on collect()
     meta_error: Option<String>,
     vec_filter: Option<(f32, VecCmp)>,
     take_type: Option<TakeType>,

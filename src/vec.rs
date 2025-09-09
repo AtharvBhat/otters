@@ -1,9 +1,8 @@
-//! Vector store and query planning primitives.
+//! Vector store and query planning
 //!
-//! Provides an in-memory row-major `VecStore` and a builder-style `VecQueryPlan`
-//! supporting cosine, dot product, and squared euclidean similarity with optional
-//! score filtering and row masking. Batch queries are treated as a single search
-//! over multiple inputs and return one merged result set.
+//! In‑memory row‑major `VecStore` with a builder‑style `VecQueryPlan` supporting
+//! cosine, dot product, and squared euclidean. Optional score filters, row masks,
+//! and merged results for batched queries.
 use crate::vec_compute::TopKCollector;
 pub use crate::vec_compute::{cosine_similarity, dot_product, euclidean_distance_squared};
 use bitvec::prelude::BitVec;
@@ -32,9 +31,6 @@ pub enum Cmp {
 }
 
 /// Rich result type for vector (and metadata) queries.
-/// Provides a stable, extensible surface instead of raw (index, score) tuples.
-/// Additional metadata fields (e.g. chunk id, original vector reference, column slices)
-/// can be added later without breaking tuple-based callers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SearchResult {
     pub index: usize,
@@ -70,6 +66,7 @@ pub struct VecQueryPlan<'a> {
 }
 
 impl<'a> VecQueryPlan<'a> {
+    /// Create an empty query plan; chain builder methods to configure it.
     pub fn new() -> Self {
         Self {
             query_vectors: None,
@@ -118,10 +115,12 @@ impl<'a> VecQueryPlan<'a> {
         self
     }
 
+    /// Attach the store to search in.
     pub fn with_vector_store(self, store: &'a VecStore) -> Self {
         self.map_ok(|s| s.vector_store = Some(store))
     }
 
+    /// Provide one or more query vectors (single or batch).
     pub fn with_query_vectors(self, queries: impl Into<QueryBatch>) -> Self {
         self.map_ok(|s| {
             let query_batch = queries.into();
@@ -138,26 +137,32 @@ impl<'a> VecQueryPlan<'a> {
         })
     }
 
+    /// Select the similarity metric.
     pub fn with_metric(self, metric: Metric) -> Self {
         self.map_ok(|s| s.search_metric = Some(metric))
     }
 
+    /// Optional row mask to limit candidate rows.
     pub fn with_row_mask(self, mask: BitVec) -> Self {
         self.map_ok(|s| s.row_mask = Some(mask))
     }
 
+    /// Keep only results where score `cmp` threshold.
     pub fn filter(self, score: f32, cmp: Cmp) -> Self {
         self.map_ok(|s| s.filter_criteria = Some((score, cmp)))
     }
 
+    /// Keep top `count` by the metric's default ordering.
     pub fn take(self, count: usize) -> Self {
         self.take_with_options(count, None)
     }
 
+    /// Keep the smallest `count` scores.
     pub fn take_min(self, count: usize) -> Self {
         self.take_with_options(count, Some(TakeType::Min))
     }
 
+    /// Keep the largest `count` scores.
     pub fn take_max(self, count: usize) -> Self {
         self.take_with_options(count, Some(TakeType::Max))
     }
@@ -197,6 +202,7 @@ impl<'a> VecQueryPlan<'a> {
         Ok(())
     }
 
+    /// Execute the plan and return results.
     pub fn collect(self) -> Result<Vec<SearchResult>, String> {
         self.validate()?;
 
@@ -338,6 +344,7 @@ pub struct VecStore {
 }
 
 impl VecStore {
+    /// Create an empty store for vectors of fixed dimension `dim`.
     pub fn new(dim: usize) -> Self {
         Self {
             vectors: Vec::new(),
@@ -363,6 +370,7 @@ impl VecStore {
         Ok(())
     }
 
+    /// Append a batch of row-major vectors; validates consistent dimension.
     pub fn add_vectors(&mut self, vectors: Vec<Vec<f32>>) -> Result<(), String> {
         vectors.iter().try_for_each(|x| self.add_vector(x.to_vec()))
     }
@@ -375,6 +383,7 @@ impl VecStore {
         self.n_vecs == 0
     }
 
+    /// Start a query over this store with given queries and metric.
     pub fn query(&self, queries: impl Into<QueryBatch>, metric: Metric) -> VecQueryPlan<'_> {
         let query_batch = queries.into();
 

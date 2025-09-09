@@ -1,3 +1,40 @@
+//! Expression DSL for metadata filtering
+//!
+//! Otters exposes a small, ergonomic expression DSL for describing metadata
+//! predicates that can be pushed down into pruning and row-level filtering.
+//! Build expressions with `col("name")` and combine them with `&` (AND) and
+//! `|` (OR). Expressions are type-checked and compiled against your schema
+//! before being evaluated.
+//!
+//! Examples
+//! --------
+//! ```rust
+//! use otters::expr::col;
+//!
+//! // price <= 40 AND version >= 2
+//! let e1 = col("price").lte(40.0) & col("version").gte(2);
+//!
+//! // (age < 18 OR age > 65) AND name != "alice"
+//! let e2 = (col("age").lt(18) | col("age").gt(65)) & col("name").neq("alice");
+//!
+//! // string equality OR equality
+//! let e3 = col("grade").eq("A") | col("grade").eq("B");
+//! ```
+//!
+//! Datatypes and operators
+//! -----------------------
+//! - String: Eq / Neq only
+//! - Int32 / Int64: Eq / Neq / Lt / Lte / Gt / Gte with integer literals
+//! - Float32 / Float64: same operators with float or integer literals
+//! - DateTime: same operators with a parseable datetime string
+//!   (RFC3339/ISO8601, `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`)
+//!
+//! Compiling
+//! ---------
+//! Call `Expr::compile(&schema)` to type-check the expression against your
+//! column types and obtain a `CompiledFilter` plan used internally by the
+//! engine for fast pruning.
+
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -42,6 +79,7 @@ impl From<String> for Literal {
     }
 }
 
+/// Comparison operator used in expression leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmpOp {
     Eq,
@@ -67,16 +105,18 @@ pub enum Expr {
     // And just complicates the expression tree
 }
 
-// Builder helpers similar to polars-like DSL
+/// Builder for a column reference (polars-like DSL).
 pub fn col(name: &str) -> Expr {
     Expr::Column(name.to_string())
 }
+/// Builder for a literal value.
 pub fn lit<T: Into<Literal>>(v: T) -> Expr {
     Expr::Literal(v.into())
 }
 
 impl Expr {
     // Comparison builders
+    /// Column == value
     pub fn eq<T: Into<Literal>>(self, v: T) -> Expr {
         Expr::Cmp {
             left: Box::new(self),
@@ -84,6 +124,7 @@ impl Expr {
             op: CmpOp::Eq,
         }
     }
+    /// Column != value
     pub fn neq<T: Into<Literal>>(self, v: T) -> Expr {
         Expr::Cmp {
             left: Box::new(self),
@@ -91,6 +132,7 @@ impl Expr {
             op: CmpOp::Neq,
         }
     }
+    /// Column < value
     pub fn lt<T: Into<Literal>>(self, v: T) -> Expr {
         Expr::Cmp {
             left: Box::new(self),
@@ -98,6 +140,7 @@ impl Expr {
             op: CmpOp::Lt,
         }
     }
+    /// Column <= value
     pub fn lte<T: Into<Literal>>(self, v: T) -> Expr {
         Expr::Cmp {
             left: Box::new(self),
@@ -105,6 +148,7 @@ impl Expr {
             op: CmpOp::Lte,
         }
     }
+    /// Column > value
     pub fn gt<T: Into<Literal>>(self, v: T) -> Expr {
         Expr::Cmp {
             left: Box::new(self),
@@ -112,6 +156,7 @@ impl Expr {
             op: CmpOp::Gt,
         }
     }
+    /// Column >= value
     pub fn gte<T: Into<Literal>>(self, v: T) -> Expr {
         Expr::Cmp {
             left: Box::new(self),
@@ -120,9 +165,11 @@ impl Expr {
         }
     }
 
+    /// Logical AND
     pub fn and(self, other: Expr) -> Expr {
         Expr::And(Box::new(self), Box::new(other))
     }
+    /// Logical OR
     pub fn or(self, other: Expr) -> Expr {
         Expr::Or(Box::new(self), Box::new(other))
     }
@@ -148,6 +195,7 @@ pub enum NumericLiteral {
     F64(f64),
 }
 
+/// A compiled, typed column filter used at evaluation time.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnFilter {
     Numeric {
@@ -171,11 +219,13 @@ pub enum ColumnFilter {
 /// Example: `[[A, B], [C]]` means `(A OR B) AND (C)`.
 pub type Plan = Vec<Vec<ColumnFilter>>;
 
+/// Compiled expression that is ready to be evaluated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledFilter {
     pub clauses: Plan,
 }
 
+/// Errors returned while compiling expressions to a filter plan.
 #[derive(Debug, PartialEq)]
 pub enum ExprError {
     UnknownColumn(String),
@@ -233,6 +283,10 @@ fn parse_datetime_literal_millis(s: &str) -> Option<i64> {
 }
 
 impl Expr {
+    /// Type-check and lower the expression against a `schema` into a `CompiledFilter`.
+    ///
+    /// The schema maps column names to `DataType` and is used to validate
+    /// comparator compatibility and coerce literals (e.g., ints to floats).
     pub fn compile(&self, schema: &HashMap<String, DataType>) -> Result<CompiledFilter, ExprError> {
         // Lower the expression to a filter plan
         // and then normalize the clauses

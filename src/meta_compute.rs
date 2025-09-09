@@ -1,3 +1,7 @@
+//! Pruning and per-chunk/row compute for metadata filters
+//!
+//! Internal helpers to build zonemap statistics (min/max/nulls and per-chunk
+//! Bloom filters), row masks, and to process chunks during MetaStore queries.
 use std::collections::HashMap;
 
 use bitvec::bitvec;

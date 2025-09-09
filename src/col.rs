@@ -1,3 +1,8 @@
+//! Column storage and typed values
+//!
+//! Defines `Column` with typed backing storage, a null mask, and helpers to
+//! push/read values (including basic datetime parsing). Used by MetaStore to
+//! hold metadata alongside vectors.
 use crate::type_utils::DataType;
 use bitvec::prelude::*;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};

@@ -1,8 +1,6 @@
-//! Low-level SIMD wrapper types and masking helpers.
+//! Low-level SIMD wrappers and masking helpers (internal)
 //!
-//! Supplies ad‑hoc 8‑wide vectors (built from two 4‑wide lanes) plus masking
-//! utilities used by metadata pruning and row-level filtering. Where direct
-//! `wide` crate support exists we delegate; otherwise we compose manually.
+//! 8‑wide composite vectors and bit‑mask utilities used by pruning and filters.
 // Wrapper types that provide 8-wide SIMD operations using two 4-wide operations
 // Not all traits are implemented for all types in wide. Falls back to scalar logic when needed.
 #![allow(non_camel_case_types)]
