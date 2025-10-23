@@ -29,6 +29,14 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+arrow = { version = "57.0.0", features = ["prettyprint"] }
+arrow-array = "57.0.0"
+arrow-buffer = "57.0.0"
+arrow-cast = "57.0.0"
+arrow-ord = "57.0.0"
+arrow-schema = "57.0.0"
+arrow-select = "57.0.0"
+arrow-string = "57.0.0"
 bitvec = "1.0.1"
 chrono = "0.4.41"
 fastbloom = "0.14.0"

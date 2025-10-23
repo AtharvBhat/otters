@@ -2,12 +2,8 @@
 
 pub mod col;
 pub mod expr;
-pub mod meta;
 pub mod prelude;
+pub mod store;
 #[doc(hidden)]
 pub mod type_utils;
-pub mod vec;
-
-mod display;
-mod meta_compute;
-mod vec_compute;
+pub mod vec_compute;

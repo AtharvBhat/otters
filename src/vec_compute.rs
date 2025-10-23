@@ -1,10 +1,11 @@
-//! Low-level SIMD kernels for vector math and top-k selection
+//! SIMD kernels for vector similarity computations
 //!
-//! Internal building blocks used by `vec` module: dot product, cosine,
-//! squared euclidean, and small helpers for filtering and top-k.
-use crate::vec::{Cmp, TakeType};
+//! Pure computational kernels optimized with SIMD (8-wide f32 lanes).
+//! These operate on raw slices and are independent of Arrow storage.
+
 use wide::*;
 
+/// Compute dot product using SIMD
 #[inline(always)]
 pub fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
     vec1.chunks_exact(8)
@@ -21,6 +22,7 @@ pub fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
             .sum::<f32>()
 }
 
+/// Compute cosine similarity with pre-computed inverse norms
 #[inline(always)]
 pub fn cosine_similarity(
     vec1: &[f32],
@@ -31,6 +33,7 @@ pub fn cosine_similarity(
     dot_product(vec1, vec2) * vec1_inv_norm * vec2_inv_norm
 }
 
+/// Compute squared Euclidean distance using SIMD
 #[inline(always)]
 pub fn euclidean_distance_squared(vec1: &[f32], vec2: &[f32]) -> f32 {
     vec1.chunks_exact(8)
@@ -53,242 +56,9 @@ pub fn euclidean_distance_squared(vec1: &[f32], vec2: &[f32]) -> f32 {
             .sum::<f32>()
 }
 
-fn filter_mask_bits(scores: f32x8, threshold: f32, cmp: &Cmp) -> u8 {
-    let t = f32x8::splat(threshold);
-    let m = match cmp {
-        Cmp::Lt => scores.cmp_lt(t),
-        Cmp::Gt => scores.cmp_gt(t),
-        Cmp::Lte => scores.cmp_le(t),
-        Cmp::Gte => scores.cmp_ge(t),
-        Cmp::Eq => scores.cmp_eq(t),
-    };
-    // Convert boolean lanes to a compact 8-bit mask
-    let arr = m.to_array();
-    let mut bits: u8 = 0;
-    for (i, &v) in arr.iter().enumerate() {
-        if v != 0.0 {
-            bits |= 1 << i;
-        }
-    }
-    bits
-}
-
-// Top-K collector with integrated filtering
-pub struct TopKCollector<'a> {
-    buffer: Vec<(usize, f32)>,
-    k: usize,
-    take_type: &'a TakeType,
-    filter: Option<&'a (f32, Cmp)>,
-    is_sorted: bool,
-    threshold: f32,
-    effective_threshold: Option<f32>,
-    effective_cmp: Option<Cmp>,
-}
-
-impl<'a> TopKCollector<'a> {
-    pub fn new(k: usize, take_type: &'a TakeType, filter: Option<&'a (f32, Cmp)>) -> Self {
-        let threshold = match take_type {
-            TakeType::Min => f32::INFINITY,
-            TakeType::Max => f32::NEG_INFINITY,
-        };
-
-        // Calculate effective threshold and comparison once at init
-        let (effective_threshold, effective_cmp) = match filter {
-            Some((filter_threshold, filter_cmp)) => {
-                // Determine which threshold is more restrictive
-                let combined_threshold = match (take_type, filter_cmp) {
-                    (TakeType::Min, Cmp::Lt) | (TakeType::Min, Cmp::Lte) => {
-                        // For min operations, use the smaller threshold
-                        Some(filter_threshold.min(threshold))
-                    }
-                    (TakeType::Max, Cmp::Gt) | (TakeType::Max, Cmp::Gte) => {
-                        // For max operations, use the larger threshold
-                        Some(filter_threshold.max(threshold))
-                    }
-                    _ => Some(*filter_threshold),
-                };
-                (combined_threshold, Some(filter_cmp.clone()))
-            }
-            None => (None, None),
-        };
-
-        Self {
-            buffer: Vec::with_capacity(k),
-            k,
-            take_type,
-            filter,
-            is_sorted: true,
-            threshold,
-            effective_threshold,
-            effective_cmp,
-        }
-    }
-
-    fn get_effective_threshold(&self) -> Option<(f32, Cmp)> {
-        match (&self.effective_threshold, &self.effective_cmp) {
-            (Some(threshold), Some(cmp)) => Some((*threshold, cmp.clone())),
-            _ => {
-                if self.buffer.len() == self.k {
-                    match &self.take_type {
-                        TakeType::Min => Some((self.threshold, Cmp::Lt)),
-                        TakeType::Max => Some((self.threshold, Cmp::Gt)),
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn update_effective_threshold(&mut self) {
-        if self.buffer.len() == self.k {
-            if let Some(ref mut eff_threshold) = self.effective_threshold {
-                // Update the effective threshold based on current topk threshold and filter
-                match (&self.take_type, &self.effective_cmp) {
-                    (TakeType::Min, Some(Cmp::Lt)) | (TakeType::Min, Some(Cmp::Lte)) => {
-                        *eff_threshold = eff_threshold.min(self.threshold);
-                    }
-                    (TakeType::Max, Some(Cmp::Gt)) | (TakeType::Max, Some(Cmp::Gte)) => {
-                        *eff_threshold = eff_threshold.max(self.threshold);
-                    }
-                    _ => {} // For other comparisons, keep filter threshold
-                }
-            } else {
-                // No filter, just use topk threshold
-                self.effective_threshold = Some(self.threshold);
-                self.effective_cmp = Some(match &self.take_type {
-                    TakeType::Min => Cmp::Lt,
-                    TakeType::Max => Cmp::Gt,
-                });
-            }
-        }
-    }
-
-    // Like push_chunk, but also applies an optional row mask for the 8-lane block
-    pub fn push_chunk_masked(
-        &mut self,
-        chunk_idx: usize,
-        scores: f32x8,
-        rowmask: Option<[bool; 8]>,
-    ) {
-        if self.k == 0 {
-            return;
-        }
-
-        // Build threshold mask bits
-        let tbits: u8 = match self.get_effective_threshold() {
-            Some((threshold, cmp)) => filter_mask_bits(scores, threshold, &cmp),
-            None => 0xFF,
-        };
-
-        // Row mask bits (all ones if no mask)
-        let sbits: u8 = match rowmask {
-            Some(m) => {
-                let mut b = 0u8;
-                for (i, &on) in m.iter().enumerate() {
-                    if on {
-                        b |= 1 << i;
-                    }
-                }
-                b
-            }
-            None => 0xFF,
-        };
-
-        let bits = tbits & sbits;
-        if bits == 0 {
-            return;
-        }
-        let scores_arr = scores.to_array();
-        for (i, &score) in scores_arr.iter().enumerate() {
-            if (bits >> i) & 1 == 1 {
-                self.push_single(chunk_idx * 8 + i, score);
-            }
-        }
-    }
-
-    pub fn push_scalars(&mut self, scores: Vec<(usize, f32)>) {
-        if self.k == 0 {
-            return;
-        }
-
-        // Filter based on criteria
-        let filtered: Vec<(usize, f32)> = match &self.filter {
-            Some((threshold, cmp)) => scores
-                .into_iter()
-                .filter(|&(_, score)| match cmp {
-                    Cmp::Lt => score < *threshold,
-                    Cmp::Gt => score > *threshold,
-                    Cmp::Lte => score <= *threshold,
-                    Cmp::Gte => score >= *threshold,
-                    Cmp::Eq => score == *threshold,
-                })
-                .collect(),
-            None => scores,
-        };
-
-        // Push filtered scores
-        filtered.into_iter().for_each(|(idx, score)| {
-            self.push_single(idx, score);
-        });
-    }
-
-    fn push_single(&mut self, idx: usize, score: f32) {
-        if score.is_nan() {
-            return;
-        }
-        match self.buffer.len() == self.k {
-            true => {
-                // Buffer full - check if we should insert
-                let should_insert = match &self.take_type {
-                    TakeType::Min => score < self.threshold,
-                    TakeType::Max => score > self.threshold,
-                };
-
-                if should_insert {
-                    let pos = self.find_insert_position(score);
-                    self.buffer.insert(pos, (idx, score));
-                    self.buffer.pop();
-                    self.threshold = self.buffer[self.k - 1].1;
-                    self.update_effective_threshold();
-                }
-            }
-            false => {
-                // Buffer not full - always insert
-                self.buffer.push((idx, score));
-                self.is_sorted = false;
-
-                if self.buffer.len() == self.k {
-                    self.sort();
-                    self.threshold = self.buffer[self.k - 1].1;
-                    self.update_effective_threshold();
-                }
-            }
-        }
-    }
-
-    fn find_insert_position(&self, score: f32) -> usize {
-        self.buffer
-            .binary_search_by(|probe| match &self.take_type {
-                TakeType::Min => probe.1.total_cmp(&score),
-                TakeType::Max => score.total_cmp(&probe.1),
-            })
-            .unwrap_or_else(|e| e)
-    }
-
-    fn sort(&mut self) {
-        if !self.is_sorted {
-            let cmp_fn = match &self.take_type {
-                TakeType::Min => |a: &(usize, f32), b: &(usize, f32)| a.1.total_cmp(&b.1),
-                TakeType::Max => |a: &(usize, f32), b: &(usize, f32)| b.1.total_cmp(&a.1),
-            };
-            self.buffer.sort_unstable_by(cmp_fn);
-            self.is_sorted = true;
-        }
-    }
-
-    pub fn into_sorted_vec(mut self) -> Vec<(usize, f32)> {
-        self.sort();
-        self.buffer
-    }
+/// Compute inverse norm for a vector (1 / ||v||)
+#[inline]
+pub fn inverse_norm(vec: &[f32]) -> f32 {
+    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm != 0.0 { 1.0 / norm } else { 0.0 }
 }
