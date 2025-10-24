@@ -6,8 +6,6 @@ use arrow::array::{Float32Array, Int64Array};
 use arrow::util::pretty::print_batches;
 use otters::expr::cosine;
 use otters::prelude::*;
-use otters::type_utils::DataType;
-use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Otters Arrow Store Demo ===\n");
@@ -105,14 +103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build a query: cosine similarity > 0.75 and age >= 28, take top 3 matches
     let query_vector = vec![1.0, 0.0, 0.0, 0.0];
-    let expr = cosine().gt(0.75) & col("age").gte(28);
-    let mut schema = HashMap::new();
-    schema.insert("age".to_string(), DataType::Int32);
-    let compiled = expr.compile(&schema).unwrap();
-
     let results = store
         .query(query_vector)
-        .filter(compiled)
+        .filter(cosine().gt(0.75) & col("age").gte(28))
         .take(3)
         .collect()?;
 

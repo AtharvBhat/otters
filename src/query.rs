@@ -18,10 +18,14 @@ use arrow_array::Datum;
 use arrow_ord::cmp as ord_cmp;
 use arrow_ord::sort::{SortOptions, sort_to_indices};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::expr::{CmpOp, ColumnFilter, CompiledFilter, MetadataPlan, MetricExpr, MetricPlan};
+use crate::expr::{
+    CmpOp, ColumnFilter, CompiledFilter, Expr, MetadataPlan, MetricExpr, MetricPlan,
+};
 use crate::store::OttersStore;
+use crate::type_utils::DataType as OttersDataType;
 use crate::vec_compute::{
     cosine_similarity, dot_product, euclidean_distance_squared, inverse_norm,
 };
@@ -112,7 +116,7 @@ pub struct OttersQuery<'a> {
     query_vector: Option<Vec<f32>>,
     query_inv_norm: Option<f32>,
     metric: Option<QueryMetric>,
-    filter: Option<CompiledFilter>,
+    filter_expr: Option<Expr>,
     top_k: Option<usize>,
     error: Option<String>,
 }
@@ -124,7 +128,7 @@ impl<'a> OttersQuery<'a> {
             query_vector: None,
             query_inv_norm: None,
             metric: None,
-            filter: None,
+            filter_expr: None,
             top_k: None,
             error: None,
         }
@@ -159,12 +163,12 @@ impl<'a> OttersQuery<'a> {
         self
     }
 
-    /// Attach a compiled metadata expression.
-    pub fn filter(mut self, filter: CompiledFilter) -> Self {
+    /// Attach a metadata expression that will be compiled during execution.
+    pub fn filter(mut self, filter: Expr) -> Self {
         if self.error.is_some() {
             return self;
         }
-        self.filter = Some(filter);
+        self.filter_expr = Some(filter);
         self
     }
 
@@ -187,7 +191,7 @@ impl<'a> OttersQuery<'a> {
             query_vector,
             query_inv_norm,
             metric,
-            filter,
+            filter_expr,
             top_k,
             error,
         } = self;
@@ -199,11 +203,20 @@ impl<'a> OttersQuery<'a> {
         let query = query_vector.ok_or_else(|| "Query vector not provided".to_string())?;
         let inv_norm = query_inv_norm.unwrap_or_else(|| inverse_norm(&query));
 
-        let metadata_plan = filter
+        let compiled_filter = if let Some(expr) = filter_expr {
+            Some(compile_expr(store, expr)?)
+        } else {
+            None
+        };
+
+        let metadata_plan = compiled_filter
             .as_ref()
             .map(|f| f.metadata_clauses.clone())
             .unwrap_or_default();
-        let metric_plan = filter.as_ref().map(metric_plan_from).unwrap_or_default();
+        let metric_plan = compiled_filter
+            .as_ref()
+            .map(metric_plan_from)
+            .unwrap_or_default();
 
         let inferred_metric = metric_from_plan(&metric_plan)?;
         let metric = match (metric, inferred_metric) {
@@ -245,6 +258,30 @@ impl<'a> OttersQuery<'a> {
             .clone();
 
         materialize_output(store, row_ids, scores)
+    }
+}
+
+fn compile_expr(store: &OttersStore, expr: Expr) -> Result<CompiledFilter, String> {
+    let mut schema_map: HashMap<String, OttersDataType> = HashMap::new();
+    for field in store.schema().fields() {
+        if let Some(dtype) = arrow_to_otters_type(field.data_type()) {
+            schema_map.insert(field.name().clone(), dtype);
+        }
+    }
+    expr.compile(&schema_map).map_err(|e| e.to_string())
+}
+
+fn arrow_to_otters_type(data_type: &DataType) -> Option<OttersDataType> {
+    match data_type {
+        DataType::Int32 => Some(OttersDataType::Int32),
+        DataType::Int64 => Some(OttersDataType::Int64),
+        DataType::Float32 => Some(OttersDataType::Float32),
+        DataType::Float64 => Some(OttersDataType::Float64),
+        DataType::Utf8 => Some(OttersDataType::String),
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
+            Some(OttersDataType::DateTime)
+        }
+        _ => None,
     }
 }
 
@@ -669,8 +706,6 @@ mod tests {
     use super::*;
     use crate::col::ColumnBuilder;
     use crate::expr::{col, cosine};
-    use crate::type_utils::DataType;
-    use std::collections::HashMap;
 
     fn build_store() -> OttersStore {
         let vectors = vec![
@@ -727,14 +762,9 @@ mod tests {
     fn metadata_and_metric_filters() {
         let store = build_store();
 
-        let mut schema = HashMap::new();
-        schema.insert("age".to_string(), DataType::Int32);
-        let expr = cosine().gt(0.7) & col("age").gte(40);
-        let compiled = expr.compile(&schema).unwrap();
-
         let output = store
             .query(vec![1.0, 0.0, 0.0])
-            .filter(compiled)
+            .filter(cosine().gt(0.7) & col("age").gte(40))
             .collect()
             .unwrap();
 
