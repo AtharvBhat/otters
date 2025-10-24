@@ -2,8 +2,6 @@
 //!
 //! Run with: cargo run --example arrow_store_demo
 
-use arrow::array::{Float32Array, Int64Array};
-use arrow::util::pretty::print_batches;
 use otters::expr::cosine;
 use otters::prelude::*;
 
@@ -76,12 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    // Pretty print the entire RecordBatch as a table
-    println!("RecordBatch Contents:");
-    println!("{}", "=".repeat(80));
-    print_batches(&[store.batch().clone()]).unwrap();
-    println!("{}", "=".repeat(80));
-    println!();
+    println!("Table snapshot:\n{}", store);
 
     // Get specific vector
     println!("Vector at index 0:");
@@ -109,43 +102,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .take(3)
         .collect()?;
 
-    println!("Top cosine matches (score >= 0.75 and age >= 28):");
-    let score_col = results
-        .batch
-        .column_by_name("_score")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .unwrap();
-    let row_ids = results
-        .batch
-        .column_by_name("_row_id")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-    let ages = results
-        .batch
-        .column_by_name("age")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::Int32Array>()
-        .unwrap();
-    let names = results
-        .batch
-        .column_by_name("name")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>()
-        .unwrap();
-
-    for i in 0..results.batch.num_rows() {
-        let score = score_col.value(i);
-        let id = row_ids.value(i);
-        let age = ages.value(i);
-        let name = names.value(i);
-        println!("  row {id}: {name} (age {age}) -> score {score:.4}");
-    }
+    println!(
+        "Top cosine matches (score >= 0.75 and age >= 28):\n{}",
+        results
+    );
 
     println!("\n=== Demo Complete ===");
 

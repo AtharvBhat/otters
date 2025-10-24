@@ -14,11 +14,13 @@ use arrow::compute::kernels::take::take;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
+use arrow::util::pretty::pretty_format_batches;
 use arrow_array::Datum;
 use arrow_ord::cmp as ord_cmp;
 use arrow_ord::sort::{SortOptions, sort_to_indices};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::expr::{
@@ -98,6 +100,15 @@ impl QueryOutput {
 
     pub fn is_empty(&self) -> bool {
         self.batch.num_rows() == 0
+    }
+}
+
+impl fmt::Display for QueryOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match pretty_format_batches(&[self.batch.clone()]) {
+            Ok(formatted) => write!(f, "{formatted}"),
+            Err(err) => write!(f, "Failed to format query results: {err}"),
+        }
     }
 }
 

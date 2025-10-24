@@ -8,6 +8,8 @@ use crate::col::{Column, ColumnBuilder};
 use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, Int64Array};
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
+use arrow::util::pretty::pretty_format_batches;
+use std::fmt;
 use std::sync::Arc;
 
 const DEFAULT_VECTOR_COL: &str = "embeddings";
@@ -387,5 +389,14 @@ impl OttersStore {
     /// Get the name of the row id column
     pub fn row_id_column_name(&self) -> &str {
         &self.row_id_column
+    }
+}
+
+impl fmt::Display for OttersStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match pretty_format_batches(&[self.batch.clone()]) {
+            Ok(formatted) => write!(f, "{formatted}"),
+            Err(err) => write!(f, "Failed to format OttersStore: {err}"),
+        }
     }
 }
