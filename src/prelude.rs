@@ -5,6 +5,8 @@
 
 // Main store type
 pub use crate::store::{ArrowStore, ArrowStoreBuilder};
+// Query planner
+pub use crate::query::{ArrowQuery, QueryMetric};
 
 // Commonly used compute functions
 pub use crate::vec_compute::{

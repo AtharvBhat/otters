@@ -90,10 +90,19 @@ pub enum CmpOp {
     Gte,
 }
 
+/// Identifier for the metric (vector similarity) used in query expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricExpr {
+    Cosine,
+    DotProduct,
+    Euclidean,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Column(String),
     Literal(Literal),
+    Metric(MetricExpr),
     Cmp {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -112,6 +121,21 @@ pub fn col(name: &str) -> Expr {
 /// Builder for a literal value.
 pub fn lit<T: Into<Literal>>(v: T) -> Expr {
     Expr::Literal(v.into())
+}
+
+/// Builder for a metric pseudo-column (cosine similarity).
+pub fn cosine() -> Expr {
+    Expr::Metric(MetricExpr::Cosine)
+}
+
+/// Builder for a metric pseudo-column (dot product).
+pub fn dot_product() -> Expr {
+    Expr::Metric(MetricExpr::DotProduct)
+}
+
+/// Builder for a metric pseudo-column (squared euclidean distance).
+pub fn euclidean() -> Expr {
+    Expr::Metric(MetricExpr::Euclidean)
 }
 
 impl Expr {
@@ -210,6 +234,19 @@ pub enum ColumnFilter {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricFilter {
+    pub metric: MetricExpr,
+    pub cmp: CmpOp,
+    pub threshold: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilterItem {
+    Metadata(ColumnFilter),
+    Metric(MetricFilter),
+}
+
 /// Filter plan representation used by the expression compiler.
 ///
 /// Invariant:
@@ -217,12 +254,18 @@ pub enum ColumnFilter {
 /// - Each inner Vec represents a single clause, which is an OR over ColumnFilter items.
 ///
 /// Example: `[[A, B], [C]]` means `(A OR B) AND (C)`.
-pub type Plan = Vec<Vec<ColumnFilter>>;
+pub type Plan = Vec<Vec<FilterItem>>;
+
+/// Metadata-only filter plan (AND-of-OR clauses over metadata predicates).
+pub type MetadataPlan = Vec<Vec<ColumnFilter>>;
+/// Metric-only filter plan.
+pub type MetricPlan = Vec<Vec<MetricFilter>>;
 
 /// Compiled expression that is ready to be evaluated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledFilter {
     pub clauses: Plan,
+    pub metadata_clauses: MetadataPlan,
 }
 
 /// Errors returned while compiling expressions to a filter plan.
@@ -233,6 +276,9 @@ pub enum ExprError {
     UnsupportedStringOp(String),
     InvalidComparison,
     InvalidExpression,
+    InvalidMetricComparison,
+    UnsupportedMetricLiteral,
+    MixedMetricMetadataClause,
 }
 
 impl fmt::Display for ExprError {
@@ -256,6 +302,16 @@ impl fmt::Display for ExprError {
                 f,
                 "Invalid expression (unexpected literal or column without comparator)"
             ),
+            ExprError::InvalidMetricComparison => write!(
+                f,
+                "Invalid expression shape for metric comparison (expect metric vs literal)"
+            ),
+            ExprError::UnsupportedMetricLiteral => {
+                write!(f, "Metric comparisons require numeric literals")
+            }
+            ExprError::MixedMetricMetadataClause => {
+                write!(f, "Metric and metadata predicates cannot be OR-ed together")
+            }
         }
     }
 }
@@ -289,18 +345,37 @@ impl Expr {
     /// comparator compatibility and coerce literals (e.g., ints to floats).
     pub fn compile(&self, schema: &HashMap<String, DataType>) -> Result<CompiledFilter, ExprError> {
         // Lower the expression to a filter plan
-        // and then normalize the clauses
+        // and then normalize the metadata clauses
         let plan = lower_to_plan(self, schema)?;
+        validate_plan(&plan)?;
+        let metadata_plan = extract_metadata_plan(&plan);
+        let metadata_clauses = normalize_metadata_plan(metadata_plan);
         Ok(CompiledFilter {
-            clauses: normalize_plan(plan),
+            clauses: plan,
+            metadata_clauses,
         })
     }
 }
 
-/// Normalize a plan by:
+impl CompiledFilter {
+    /// Extract the metric-only plan (AND-of-OR clauses) for post-scoring filtering.
+    pub fn metric_plan(&self) -> MetricPlan {
+        extract_metric_plan(&self.clauses)
+    }
+
+    /// Returns true if the filter contains any metric predicates.
+    pub fn has_metric_filters(&self) -> bool {
+        self.clauses
+            .iter()
+            .flatten()
+            .any(|item| matches!(item, FilterItem::Metric(_)))
+    }
+}
+
+/// Normalize a metadata-only plan by:
 /// - Dropping clauses that are tautologies like `(col == v) OR (col != v)`
-fn normalize_plan(mut plan: Plan) -> Plan {
-    let mut out: Plan = Vec::with_capacity(plan.len());
+fn normalize_metadata_plan(mut plan: MetadataPlan) -> MetadataPlan {
+    let mut out: MetadataPlan = Vec::with_capacity(plan.len());
 
     for clause in plan.drain(..) {
         let mut is_tautology = false;
@@ -342,6 +417,59 @@ fn normalize_plan(mut plan: Plan) -> Plan {
     out
 }
 
+fn validate_plan(plan: &Plan) -> Result<(), ExprError> {
+    for clause in plan {
+        let mut has_metadata = false;
+        let mut has_metric = false;
+        for item in clause {
+            match item {
+                FilterItem::Metadata(_) => has_metadata = true,
+                FilterItem::Metric(_) => has_metric = true,
+            }
+        }
+        if has_metadata && has_metric {
+            return Err(ExprError::MixedMetricMetadataClause);
+        }
+    }
+    Ok(())
+}
+
+fn extract_metadata_plan(plan: &Plan) -> MetadataPlan {
+    plan.iter()
+        .filter_map(|clause| {
+            let mut collected: Vec<ColumnFilter> = Vec::new();
+            for item in clause {
+                if let FilterItem::Metadata(cf) = item {
+                    collected.push(cf.clone());
+                }
+            }
+            if collected.is_empty() {
+                None
+            } else {
+                Some(collected)
+            }
+        })
+        .collect()
+}
+
+fn extract_metric_plan(plan: &Plan) -> MetricPlan {
+    plan.iter()
+        .filter_map(|clause| {
+            let mut collected: Vec<MetricFilter> = Vec::new();
+            for item in clause {
+                if let FilterItem::Metric(mf) = item {
+                    collected.push(mf.clone());
+                }
+            }
+            if collected.is_empty() {
+                None
+            } else {
+                Some(collected)
+            }
+        })
+        .collect()
+}
+
 /// Lower an expression into a filter plan (AND of clauses with OR-inside).
 ///
 /// Rules:
@@ -367,35 +495,73 @@ fn lower_to_plan(expr: &Expr, schema: &HashMap<String, DataType>) -> Result<Plan
         Expr::Cmp { left, right, op } => {
             compile_cmp_leaf(left, right, *op, schema).map(|f| vec![vec![f]])
         }
-        Expr::Column(_) | Expr::Literal(_) => Err(ExprError::InvalidExpression),
+        Expr::Column(_) | Expr::Literal(_) | Expr::Metric(_) => Err(ExprError::InvalidExpression),
     }
 }
 
-/// Compile a single comparison leaf into a `ColumnFilter`.
+/// Compile a single comparison leaf into a filter item (metadata column or metric).
 ///
 /// Requirements:
-/// - Shape must be `Column op Literal`; otherwise `InvalidComparison`.
-/// - Column must exist in `schema`; otherwise `UnknownColumn`.
+/// - Metadata: shape must be `Column op Literal`; column must exist in `schema`.
+/// - Metric: shape must be `Metric op Literal`; literal must be numeric.
+fn compile_cmp_leaf(
+    left: &Expr,
+    right: &Expr,
+    op: CmpOp,
+    schema: &HashMap<String, DataType>,
+) -> Result<FilterItem, ExprError> {
+    match (left, right) {
+        (Expr::Column(name), Expr::Literal(lit)) => {
+            compile_column_cmp(name, lit.clone(), op, schema).map(FilterItem::Metadata)
+        }
+        (Expr::Metric(metric), Expr::Literal(lit)) => {
+            compile_metric_cmp(*metric, lit.clone(), op).map(FilterItem::Metric)
+        }
+        (Expr::Column(_), _) => Err(ExprError::InvalidComparison),
+        (Expr::Metric(_), _) => Err(ExprError::InvalidMetricComparison),
+        _ => Err(ExprError::InvalidComparison),
+    }
+}
+
+fn compile_metric_cmp(
+    metric: MetricExpr,
+    lit: Literal,
+    op: CmpOp,
+) -> Result<MetricFilter, ExprError> {
+    let threshold = match lit {
+        Literal::I64(v) => v as f32,
+        Literal::F64(v) => v as f32,
+        Literal::Str(_) => return Err(ExprError::UnsupportedMetricLiteral),
+    };
+
+    if !threshold.is_finite() {
+        return Err(ExprError::UnsupportedMetricLiteral);
+    }
+
+    Ok(MetricFilter {
+        metric,
+        cmp: op,
+        threshold,
+    })
+}
+
+/// Compile a metadata column comparison.
 ///
 /// Type rules per column data type:
 /// - String: only `Eq`/`Neq`; literal must be a string; other ops => `UnsupportedStringOp`.
 /// - Int32/Int64: literal must be `i64`; floats/strings => `TypeMismatch`.
 /// - Float32/Float64: literal may be `f64` or `i64` (widened to f64); strings => `TypeMismatch`.
 /// - DateTime: literal must be a parseable datetime string; stored as i64 millis; others => `TypeMismatch`.
-fn compile_cmp_leaf(
-    left: &Expr,
-    right: &Expr,
+fn compile_column_cmp(
+    col_name: &str,
+    lit: Literal,
     op: CmpOp,
     schema: &HashMap<String, DataType>,
 ) -> Result<ColumnFilter, ExprError> {
-    let (col_name, lit) = match (left, right) {
-        (Expr::Column(name), Expr::Literal(l)) => (name.clone(), l.clone()),
-        _ => return Err(ExprError::InvalidComparison),
-    };
-
     let dtype = schema
-        .get(&col_name)
-        .ok_or_else(|| ExprError::UnknownColumn(col_name.clone()))?;
+        .get(col_name)
+        .ok_or_else(|| ExprError::UnknownColumn(col_name.to_string()))?;
+    let column_name = col_name.to_string();
 
     match dtype {
         DataType::String => {
@@ -403,16 +569,20 @@ fn compile_cmp_leaf(
             let cmp = match op {
                 CmpOp::Eq => CmpOp::Eq,
                 CmpOp::Neq => CmpOp::Neq,
-                _ => return Err(ExprError::UnsupportedStringOp(col_name)),
+                _ => return Err(ExprError::UnsupportedStringOp(column_name)),
             };
             let rhs = match lit {
                 Literal::Str(s) => s,
                 Literal::I64(_) | Literal::F64(_) => {
-                    return Err(ExprError::TypeMismatch(col_name, *dtype, "string"));
+                    return Err(ExprError::TypeMismatch(
+                        column_name.clone(),
+                        *dtype,
+                        "string",
+                    ));
                 }
             };
             Ok(ColumnFilter::String {
-                column: col_name,
+                column: column_name,
                 cmp,
                 rhs,
             })
@@ -421,11 +591,23 @@ fn compile_cmp_leaf(
             // Numeric integral literal only
             let rhs = match lit {
                 Literal::I64(v) => NumericLiteral::I64(v),
-                Literal::F64(_) => return Err(ExprError::TypeMismatch(col_name, *dtype, "float")),
-                Literal::Str(_) => return Err(ExprError::TypeMismatch(col_name, *dtype, "string")),
+                Literal::F64(_) => {
+                    return Err(ExprError::TypeMismatch(
+                        column_name.clone(),
+                        *dtype,
+                        "float",
+                    ));
+                }
+                Literal::Str(_) => {
+                    return Err(ExprError::TypeMismatch(
+                        column_name.clone(),
+                        *dtype,
+                        "string",
+                    ));
+                }
             };
             Ok(ColumnFilter::Numeric {
-                column: col_name,
+                column: column_name,
                 cmp: op,
                 rhs,
             })
@@ -436,15 +618,23 @@ fn compile_cmp_leaf(
                 Literal::Str(s) => match parse_datetime_literal_millis(&s) {
                     Some(ms) => ms,
                     None => {
-                        return Err(ExprError::TypeMismatch(col_name, *dtype, "datetime string"));
+                        return Err(ExprError::TypeMismatch(
+                            column_name.clone(),
+                            *dtype,
+                            "datetime string",
+                        ));
                     }
                 },
                 Literal::I64(_) | Literal::F64(_) => {
-                    return Err(ExprError::TypeMismatch(col_name, *dtype, "datetime string"));
+                    return Err(ExprError::TypeMismatch(
+                        column_name.clone(),
+                        *dtype,
+                        "datetime string",
+                    ));
                 }
             };
             Ok(ColumnFilter::Numeric {
-                column: col_name,
+                column: column_name,
                 cmp: op,
                 rhs: NumericLiteral::I64(millis),
             })
@@ -454,10 +644,16 @@ fn compile_cmp_leaf(
             let rhs = match lit {
                 Literal::I64(v) => NumericLiteral::F64(v as f64),
                 Literal::F64(v) => NumericLiteral::F64(v),
-                Literal::Str(_) => return Err(ExprError::TypeMismatch(col_name, *dtype, "string")),
+                Literal::Str(_) => {
+                    return Err(ExprError::TypeMismatch(
+                        column_name.clone(),
+                        *dtype,
+                        "string",
+                    ));
+                }
             };
             Ok(ColumnFilter::Numeric {
-                column: col_name,
+                column: column_name,
                 cmp: op,
                 rhs,
             })
