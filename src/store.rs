@@ -16,7 +16,7 @@ const DEFAULT_ROW_ID_COL: &str = "_row_id";
 
 /// Unified store for vectors and metadata using Arrow RecordBatch
 #[derive(Debug, Clone)]
-pub struct ArrowStore {
+pub struct OttersStore {
     /// RecordBatch containing all columns (vectors + metadata)
     batch: RecordBatch,
 
@@ -34,8 +34,8 @@ pub struct ArrowStore {
     row_id_index: usize,
 }
 
-/// Builder for constructing an ArrowStore
-pub struct ArrowStoreBuilder {
+/// Builder for constructing an OttersStore
+pub struct OttersStoreBuilder {
     dim: i32,
     vector_column: String,
     inv_norm_column: String,
@@ -44,9 +44,10 @@ pub struct ArrowStoreBuilder {
     inv_norms: Option<Column>,
     row_ids: Option<Column>,
     metadata: Vec<(String, Column)>,
+    error: Option<String>,
 }
 
-impl ArrowStoreBuilder {
+impl OttersStoreBuilder {
     /// Create a new builder for vectors of given dimension
     pub fn new(dim: i32) -> Self {
         Self {
@@ -58,6 +59,7 @@ impl ArrowStoreBuilder {
             inv_norms: None,
             row_ids: None,
             metadata: Vec::new(),
+            error: None,
         }
     }
 
@@ -80,47 +82,53 @@ impl ArrowStoreBuilder {
     }
 
     /// Add vectors from a Vec<Vec<f32>>
-    pub fn with_vectors(mut self, vectors: Vec<Vec<f32>>) -> Result<Self, String> {
-        if vectors.is_empty() {
-            return Err("Cannot add empty vector list".to_string());
+    pub fn with_vectors(mut self, vectors: Vec<Vec<f32>>) -> Self {
+        if self.error.is_some() {
+            return self;
         }
 
-        // Validate dimensions
+        if vectors.is_empty() {
+            self.error = Some("Cannot add empty vector list".to_string());
+            return self;
+        }
+
         for (i, vec) in vectors.iter().enumerate() {
             if vec.len() != self.dim as usize {
-                return Err(format!(
-                    "Vector at index {} has dimension {}, expected {}",
-                    i,
+                self.error = Some(format!(
+                    "Vector at index {i} has dimension {}, expected {}",
                     vec.len(),
                     self.dim
                 ));
+                return self;
             }
         }
 
-        // Build columns
         let mut vec_builder = ColumnBuilder::new_vector(&self.vector_column, self.dim);
         let mut inv_builder = ColumnBuilder::new_float32(&self.inv_norm_column);
         let mut row_builder = ColumnBuilder::new_int64(&self.row_id_column);
 
         for (row_id, vec) in vectors.iter().enumerate() {
-            vec_builder
-                .append_vector(Some(vec.as_slice()))
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = vec_builder.append_vector(Some(vec.as_slice())) {
+                self.error = Some(e.to_string());
+                return self;
+            }
 
             let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
             let inv = if norm != 0.0 { 1.0 / norm } else { 0.0 };
-            inv_builder
-                .append_f32(Some(inv))
-                .map_err(|e| e.to_string())?;
-            row_builder
-                .append_i64(Some(row_id as i64))
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = inv_builder.append_f32(Some(inv)) {
+                self.error = Some(e.to_string());
+                return self;
+            }
+            if let Err(e) = row_builder.append_i64(Some(row_id as i64)) {
+                self.error = Some(e.to_string());
+                return self;
+            }
         }
 
         self.vectors = Some(vec_builder.collect());
         self.inv_norms = Some(inv_builder.collect());
         self.row_ids = Some(row_builder.collect());
-        Ok(self)
+        self
     }
 
     fn is_reserved_name(&self, name: &str) -> bool {
@@ -128,39 +136,49 @@ impl ArrowStoreBuilder {
     }
 
     /// Add a metadata column
-    pub fn with_metadata_column(
-        mut self,
-        name: impl Into<String>,
-        column: Column,
-    ) -> Result<Self, String> {
+    pub fn with_metadata_column(mut self, name: impl Into<String>, column: Column) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+
         let name = name.into();
         if self.is_reserved_name(&name) {
-            return Err(format!(
+            self.error = Some(format!(
                 "Metadata column name '{name}' conflicts with reserved store columns"
             ));
+            return self;
         }
         self.metadata.push((name, column));
-        Ok(self)
+        self
     }
 
     /// Add multiple metadata columns
     pub fn with_metadata_columns(
         mut self,
         columns: impl IntoIterator<Item = (String, Column)>,
-    ) -> Result<Self, String> {
+    ) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+
         for (name, column) in columns {
             if self.is_reserved_name(&name) {
-                return Err(format!(
+                self.error = Some(format!(
                     "Metadata column name '{name}' conflicts with reserved store columns"
                 ));
+                return self;
             }
             self.metadata.push((name, column));
         }
-        Ok(self)
+        self
     }
 
     /// Build the final store
-    pub fn build(self) -> Result<ArrowStore, String> {
+    pub fn build(self) -> Result<OttersStore, String> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+
         let vectors = self
             .vectors
             .ok_or_else(|| "Vectors not provided".to_string())?;
@@ -247,7 +265,7 @@ impl ArrowStoreBuilder {
             .index_of(&self.row_id_column)
             .map_err(|e| format!("Row id column '{}' missing: {e}", self.row_id_column))?;
 
-        Ok(ArrowStore {
+        Ok(OttersStore {
             batch,
             dim: self.dim,
             vector_column: self.vector_column,
@@ -260,10 +278,10 @@ impl ArrowStoreBuilder {
     }
 }
 
-impl ArrowStore {
+impl OttersStore {
     /// Create a new builder for given dimension
-    pub fn builder(dim: i32) -> ArrowStoreBuilder {
-        ArrowStoreBuilder::new(dim)
+    pub fn builder(dim: i32) -> OttersStoreBuilder {
+        OttersStoreBuilder::new(dim)
     }
 
     /// Get number of rows

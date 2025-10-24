@@ -1,7 +1,7 @@
 //! Arrow-native query planning and execution helpers.
 //!
 //! Provides building blocks for evaluating metadata expressions against an
-//! [`ArrowStore`](crate::store::ArrowStore) and extracting candidate row ids
+//! [`OttersStore`](crate::store::OttersStore) and extracting candidate row ids
 //! prior to vector scoring.
 
 use arrow::array::{
@@ -21,7 +21,7 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 use crate::expr::{CmpOp, ColumnFilter, CompiledFilter, MetadataPlan, MetricExpr, MetricPlan};
-use crate::store::ArrowStore;
+use crate::store::OttersStore;
 use crate::vec_compute::{
     cosine_similarity, dot_product, euclidean_distance_squared, inverse_norm,
 };
@@ -97,18 +97,28 @@ impl QueryOutput {
     }
 }
 
-/// Builder for executing vector + metadata queries against an [`ArrowStore`].
-pub struct ArrowQuery<'a> {
-    store: &'a ArrowStore,
+impl OttersStore {
+    /// Start a new query plan for the provided query vector.
+    pub fn query(&self, vector: Vec<f32>) -> OttersQuery<'_> {
+        let mut plan = OttersQuery::new(self);
+        plan.set_query_vector(vector);
+        plan
+    }
+}
+
+/// Builder for executing vector + metadata queries against an [`OttersStore`].
+pub struct OttersQuery<'a> {
+    store: &'a OttersStore,
     query_vector: Option<Vec<f32>>,
     query_inv_norm: Option<f32>,
     metric: Option<QueryMetric>,
     filter: Option<CompiledFilter>,
     top_k: Option<usize>,
+    error: Option<String>,
 }
 
-impl<'a> ArrowQuery<'a> {
-    pub fn new(store: &'a ArrowStore) -> Self {
+impl<'a> OttersQuery<'a> {
+    fn new(store: &'a OttersStore) -> Self {
         Self {
             store,
             query_vector: None,
@@ -116,33 +126,44 @@ impl<'a> ArrowQuery<'a> {
             metric: None,
             filter: None,
             top_k: None,
+            error: None,
         }
     }
 
-    /// Provide the query vector to score against (single-vector queries for now).
-    pub fn query(mut self, vector: Vec<f32>) -> Result<Self, String> {
+    fn set_query_vector(&mut self, vector: Vec<f32>) {
+        if self.error.is_some() {
+            return;
+        }
+
         let expected = self.store.dim() as usize;
         if vector.len() != expected {
-            return Err(format!(
+            self.error = Some(format!(
                 "Query vector dimension {} does not match store dimension {}",
                 vector.len(),
                 expected
             ));
+            return;
         }
+
         let inv_norm = inverse_norm(&vector);
         self.query_vector = Some(vector);
         self.query_inv_norm = Some(inv_norm);
-        Ok(self)
     }
 
     /// Select the metric to use for scoring.
     pub fn metric(mut self, metric: QueryMetric) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
         self.metric = Some(metric);
         self
     }
 
     /// Attach a compiled metadata expression.
     pub fn filter(mut self, filter: CompiledFilter) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
         self.filter = Some(filter);
         self
     }
@@ -152,30 +173,40 @@ impl<'a> ArrowQuery<'a> {
     /// Similarity metrics (`Cosine`, `DotProduct`) return the highest scores first,
     /// while distance metrics (`Euclidean`) return the smallest distances first.
     pub fn take(mut self, k: usize) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
         self.top_k = Some(k);
         self
     }
 
     /// Execute the query plan and return the materialized results.
     pub fn collect(self) -> Result<QueryOutput, String> {
-        let query = self
-            .query_vector
-            .ok_or_else(|| "Query vector not provided".to_string())?;
-        let inv_norm = self.query_inv_norm.unwrap_or_else(|| inverse_norm(&query));
+        let OttersQuery {
+            store,
+            query_vector,
+            query_inv_norm,
+            metric,
+            filter,
+            top_k,
+            error,
+        } = self;
 
-        let metadata_plan = self
-            .filter
+        if let Some(err) = error {
+            return Err(err);
+        }
+
+        let query = query_vector.ok_or_else(|| "Query vector not provided".to_string())?;
+        let inv_norm = query_inv_norm.unwrap_or_else(|| inverse_norm(&query));
+
+        let metadata_plan = filter
             .as_ref()
             .map(|f| f.metadata_clauses.clone())
             .unwrap_or_default();
-        let metric_plan = self
-            .filter
-            .as_ref()
-            .map(metric_plan_from)
-            .unwrap_or_default();
+        let metric_plan = filter.as_ref().map(metric_plan_from).unwrap_or_default();
 
         let inferred_metric = metric_from_plan(&metric_plan)?;
-        let metric = match (self.metric, inferred_metric) {
+        let metric = match (metric, inferred_metric) {
             (Some(explicit), Some(inferred)) if explicit != inferred => {
                 return Err(format!(
                     "Metric {explicit:?} specified in query conflicts with metric {inferred:?} in filter"
@@ -186,24 +217,17 @@ impl<'a> ArrowQuery<'a> {
             (None, None) => QueryMetric::Cosine,
         };
 
-        let selection = apply_metadata_filters(self.store, &metadata_plan)?;
+        let selection = apply_metadata_filters(store, &metadata_plan)?;
 
-        let scored = score_candidates(
-            self.store,
-            &query,
-            inv_norm,
-            metric,
-            &selection,
-            &metric_plan,
-        )?;
+        let scored = score_candidates(store, &query, inv_norm, metric, &selection, &metric_plan)?;
 
         if scored.is_empty() {
-            return build_empty_output(self.store);
+            return build_empty_output(store);
         }
 
         let (row_ids_array, scores_array) = build_score_arrays(&scored);
         let sorted_indices =
-            sort_scores(&scores_array, metric, self.top_k).map_err(|e| e.to_string())?;
+            sort_scores(&scores_array, metric, top_k).map_err(|e| e.to_string())?;
         let sorted_row_ids =
             take(row_ids_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
         let sorted_scores =
@@ -220,14 +244,14 @@ impl<'a> ArrowQuery<'a> {
             .ok_or_else(|| "Failed to downcast sorted scores".to_string())?
             .clone();
 
-        materialize_output(self.store, row_ids, scores)
+        materialize_output(store, row_ids, scores)
     }
 }
 
 /// Apply metadata filters to the store, producing a selection mask and the
 /// filtered row ids. Uses Rayon to evaluate clause masks in parallel.
 pub fn apply_metadata_filters(
-    store: &ArrowStore,
+    store: &OttersStore,
     plan: &MetadataPlan,
 ) -> Result<MetadataSelection, String> {
     let batch = store.batch();
@@ -475,7 +499,7 @@ fn metric_from_plan(plan: &MetricPlan) -> Result<Option<QueryMetric>, String> {
 }
 
 fn score_candidates(
-    store: &ArrowStore,
+    store: &OttersStore,
     query: &[f32],
     query_inv_norm: f32,
     metric: QueryMetric,
@@ -591,7 +615,7 @@ fn sort_scores(
 }
 
 fn materialize_output(
-    store: &ArrowStore,
+    store: &OttersStore,
     row_ids: Int64Array,
     scores: Float32Array,
 ) -> Result<QueryOutput, String> {
@@ -634,7 +658,7 @@ fn to_u32_indices(row_ids: &Int64Array) -> Result<UInt32Array, String> {
     Ok(UInt32Array::from(values))
 }
 
-fn build_empty_output(store: &ArrowStore) -> Result<QueryOutput, String> {
+fn build_empty_output(store: &OttersStore) -> Result<QueryOutput, String> {
     let empty_ids = Int64Array::from(Vec::<i64>::new());
     let empty_scores = Float32Array::from(Vec::<f32>::new());
     materialize_output(store, empty_ids, empty_scores)
@@ -648,7 +672,7 @@ mod tests {
     use crate::type_utils::DataType;
     use std::collections::HashMap;
 
-    fn build_store() -> ArrowStore {
+    fn build_store() -> OttersStore {
         let vectors = vec![
             vec![1.0, 0.0, 0.0],
             vec![0.8, 0.2, 0.0],
@@ -661,11 +685,9 @@ mod tests {
         age_builder.append_i32(Some(45)).unwrap();
         let ages = age_builder.collect();
 
-        ArrowStore::builder(3)
+        OttersStore::builder(3)
             .with_vectors(vectors)
-            .unwrap()
             .with_metadata_column("age", ages)
-            .unwrap()
             .build()
             .unwrap()
     }
@@ -673,9 +695,8 @@ mod tests {
     #[test]
     fn cosine_query_topk() {
         let store = build_store();
-        let output = ArrowQuery::new(&store)
+        let output = store
             .query(vec![1.0, 0.0, 0.0])
-            .unwrap()
             .metric(QueryMetric::Cosine)
             .take(2)
             .collect()
@@ -711,9 +732,8 @@ mod tests {
         let expr = cosine().gt(0.7) & col("age").gte(40);
         let compiled = expr.compile(&schema).unwrap();
 
-        let output = ArrowQuery::new(&store)
+        let output = store
             .query(vec![1.0, 0.0, 0.0])
-            .unwrap()
             .filter(compiled)
             .collect()
             .unwrap();

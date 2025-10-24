@@ -54,11 +54,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scores = scores_builder.collect();
 
     // Build the Arrow store
-    let store = ArrowStore::builder(dim)
-        .with_vectors(vectors)?
-        .with_metadata_column("name", names)?
-        .with_metadata_column("age", ages)?
-        .with_metadata_column("score", scores)?
+    let store = OttersStore::builder(dim)
+        .with_vectors(vectors)
+        .with_metadata_column("name", names)
+        .with_metadata_column("age", ages)
+        .with_metadata_column("score", scores)
         .build()?;
 
     println!("Store created successfully!\n");
@@ -110,8 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     schema.insert("age".to_string(), DataType::Int32);
     let compiled = expr.compile(&schema).unwrap();
 
-    let results = ArrowQuery::new(&store)
-        .query(query_vector)?
+    let results = store
+        .query(query_vector)
         .filter(compiled)
         .take(3)
         .collect()?;

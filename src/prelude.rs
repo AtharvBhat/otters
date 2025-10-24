@@ -4,9 +4,9 @@
 //! `use otters::prelude::*;`.
 
 // Main store type
-pub use crate::store::{ArrowStore, ArrowStoreBuilder};
+pub use crate::store::{OttersStore, OttersStoreBuilder};
 // Query planner
-pub use crate::query::{ArrowQuery, QueryMetric};
+pub use crate::query::{OttersQuery, QueryMetric};
 
 // Commonly used compute functions
 pub use crate::vec_compute::{
