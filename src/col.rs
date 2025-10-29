@@ -41,14 +41,14 @@ impl From<arrow::error::ArrowError> for ColumnError {
 }
 
 /// Arrow-backed column - just a thin wrapper around Arrow arrays
-pub struct Column {
+pub struct OttersColumn {
     field: Field,
     array: ArrayRef,
 }
 
-impl fmt::Debug for Column {
+impl fmt::Debug for OttersColumn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Column")
+        f.debug_struct("OttersColumn")
             .field("name", &self.field.name())
             .field("dtype", &self.field.data_type())
             .field("len", &self.array.len())
@@ -57,7 +57,7 @@ impl fmt::Debug for Column {
     }
 }
 
-impl Column {
+impl OttersColumn {
     /// Create from existing Arrow array
     pub fn from_arrow(name: impl Into<String>, array: ArrayRef) -> Self {
         let field = Field::new(name, array.data_type().clone(), true);
@@ -241,7 +241,7 @@ impl Column {
 }
 
 /// Builder for constructing Arrow columns with convenient API
-pub struct ColumnBuilder {
+pub struct Column {
     name: String,
     builder: BuilderEnum,
     datetime_format: Option<String>,
@@ -257,7 +257,7 @@ enum BuilderEnum {
     Vector(FixedSizeListBuilder<PrimitiveBuilder<Float32Type>>),
 }
 
-impl ColumnBuilder {
+impl Column {
     /// Create Int32 column builder
     pub fn new_int32(name: impl Into<String>) -> Self {
         Self {
@@ -360,7 +360,7 @@ impl ColumnBuilder {
     }
 
     /// Build the final column (consumes the builder)
-    pub fn collect(self) -> Column {
+    pub fn collect(self) -> OttersColumn {
         // finish() returns concrete array types, we need to wrap them in Arc for ArrayRef
         use std::sync::Arc;
 
@@ -374,7 +374,7 @@ impl ColumnBuilder {
             BuilderEnum::Vector(mut b) => Arc::new(b.finish()),
         };
 
-        Column::from_arrow(self.name, array)
+        OttersColumn::from_arrow(self.name, array)
     }
 }
 
@@ -383,7 +383,7 @@ pub struct ColumnAppendTarget<'a> {
     builder: &'a mut BuilderEnum,
 }
 
-/// Internal helper implemented for types supported by [`ColumnBuilder::append`].
+/// Internal helper implemented for types supported by [`Column::append`].
 trait ColumnType: Copy {
     fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError>;
 
@@ -408,7 +408,7 @@ trait ColumnType: Copy {
     }
 }
 
-/// Helper trait powering [`ColumnBuilder::append`].
+/// Helper trait powering [`Column::append`].
 pub trait ColumnValues {
     fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError>;
 }

@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Build metadata columns in bulk
-    let mut names_builder = ColumnBuilder::new_string("name");
+    let mut names_builder = Column::new_string("name");
     names_builder.append([
         Some("Alice"),
         Some("Bob"),
@@ -35,12 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
     let names = names_builder.collect();
 
-    let mut ages_builder = ColumnBuilder::new_int32("age");
+    let mut ages_builder = Column::new_int32("age");
     ages_builder.append([Some(25), Some(30), Some(35), Some(28), Some(32)])?;
     let ages = ages_builder.collect();
 
     // Build the Arrow store
-    let store = OttersStore::builder(dim)
+    let store = OttersStore::new(dim)
         .with_vectors(vectors)
         .with_metadata_column("name", names)
         .with_metadata_column("age", ages)

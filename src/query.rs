@@ -23,11 +23,11 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::display::DisplayBatch;
 use crate::expr::{
     CmpOp, ColumnFilter, CompiledFilter, DataType as ExprDataType, Expr, MetadataPlan, MetricExpr,
     MetricPlan,
 };
+use crate::record::OttersRecord;
 use crate::store::OttersStore;
 use crate::vec_compute::{
     cosine_similarity, dot_product, euclidean_distance_squared, inverse_norm,
@@ -113,7 +113,7 @@ struct ScoredRow {
 /// Final query output containing a projected RecordBatch with scores.
 #[derive(Debug, Clone)]
 pub struct QueryOutput {
-    pub batch: DisplayBatch,
+    pub batch: OttersRecord,
 }
 
 impl QueryOutput {
@@ -783,7 +783,7 @@ fn materialize_output(
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema, columns).map_err(|e| e.to_string())?;
     Ok(QueryOutput {
-        batch: DisplayBatch::from(batch),
+        batch: OttersRecord::from(batch),
     })
 }
 
@@ -816,7 +816,7 @@ fn build_query_stats_batch(
     durations: &[(&str, f64)],
     metadata_stats: &[MetadataColumnStats],
     vector_stats: Option<(u64, u64)>,
-) -> Result<DisplayBatch, String> {
+) -> Result<OttersRecord, String> {
     let mut category_builder = StringBuilder::new();
     let mut name_builder = StringBuilder::new();
     let mut duration_builder = Float64Builder::new();
@@ -864,14 +864,14 @@ fn build_query_stats_batch(
     ];
 
     RecordBatch::try_new(schema, columns)
-        .map(DisplayBatch::from)
+        .map(OttersRecord::from)
         .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::col::ColumnBuilder;
+    use crate::col::Column;
     use crate::expr::{col, cosine};
 
     fn build_store() -> OttersStore {
@@ -881,13 +881,13 @@ mod tests {
             vec![0.6, 0.4, 0.0],
         ];
 
-        let mut age_builder = ColumnBuilder::new_int32("age");
+        let mut age_builder = Column::new_int32("age");
         age_builder.append(Some(25)).unwrap();
         age_builder.append(Some(35)).unwrap();
         age_builder.append(Some(45)).unwrap();
         let ages = age_builder.collect();
 
-        OttersStore::builder(3)
+        OttersStore::new(3)
             .with_vectors(vectors)
             .with_metadata_column("age", ages)
             .build()
