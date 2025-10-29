@@ -57,13 +57,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Display schema
     println!("Schema:");
-    let schema = store.schema();
-    for field in schema.fields() {
-        println!("  - {} ({:?})", field.name(), field.data_type());
-    }
+    println!("{}", store.schema());
     println!();
 
     println!("Table snapshot:\n{store}");
+
+    // Demonstrate adapting an existing Arrow RecordBatch into a new OttersStore
+    println!("Reconstructing store from existing RecordBatch...");
+    let batch = store.to_recordbatch();
+    let restored = OttersStore::from_recordbatch(batch, store.vector_column_name())?;
+    println!("Restored store schema:\n{}", restored.schema());
+    println!();
 
     // Get specific vector
     println!("Vector at index 0:");
@@ -74,14 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Access pre-computed inverse norms
-    println!("Pre-computed inverse norms for cosine similarity:");
-    for (i, inv_norm) in store.inv_norms_array().iter().enumerate().take(5) {
-        match inv_norm {
-            Some(value) => println!("  [{i}]: {value:.6}"),
-            None => println!("  [{i}]: NULL"),
-        }
+    if let Some(inv_norms) = store.column(store.inv_norm_column_name()) {
+        println!("Pre-computed inverse norms for cosine similarity:\n{inv_norms}");
+        println!();
     }
-    println!();
 
     // Build a query: cosine similarity > 0.75 and age >= 28, take top 3 matches
     let query_vector = vec![1.0, 0.0, 0.0, 0.0];

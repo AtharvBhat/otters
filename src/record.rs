@@ -1,5 +1,6 @@
 //! Helper wrappers for presenting Arrow record batches.
 
+use crate::col::OttersColumn;
 use arrow::record_batch::RecordBatch;
 use arrow::util::pretty::pretty_format_batches;
 use std::fmt;
@@ -8,6 +9,8 @@ use std::ops::{Deref, DerefMut};
 /// Wrapper around [`RecordBatch`] that implements [`Display`] for pretty printing.
 #[derive(Clone)]
 pub struct OttersRecord(RecordBatch);
+
+const RECORD_DISPLAY_PREVIEW_ROWS: usize = 10;
 
 impl OttersRecord {
     /// Create a new displayable record.
@@ -19,14 +22,45 @@ impl OttersRecord {
     pub fn into_inner(self) -> RecordBatch {
         self.0
     }
+
+    /// Fetch a column by name as an [`OttersColumn`], cloning the underlying array.
+    pub fn col(&self, name: &str) -> Option<OttersColumn> {
+        let schema = self.0.schema();
+        let (index, field) = schema.column_with_name(name)?;
+        let array = self.0.column(index).clone();
+        Some(OttersColumn::from_field(field.clone(), array))
+    }
 }
 
 impl fmt::Display for OttersRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match pretty_format_batches(&[self.0.clone()]) {
-            Ok(formatted) => write!(f, "{formatted}"),
-            Err(err) => write!(f, "Failed to format RecordBatch: {err}"),
+        let total_rows = self.0.num_rows();
+        let preview_len = total_rows.min(RECORD_DISPLAY_PREVIEW_ROWS);
+        let preview = if preview_len == total_rows {
+            self.0.clone()
+        } else {
+            self.0.slice(0, preview_len)
+        };
+
+        match pretty_format_batches(&[preview]) {
+            Ok(formatted) => {
+                let formatted = formatted.to_string();
+                if formatted.ends_with('\n') {
+                    write!(f, "{formatted}")?;
+                } else {
+                    writeln!(f, "{formatted}")?;
+                }
+            }
+            Err(err) => {
+                return write!(f, "Failed to format RecordBatch: {err}");
+            }
         }
+
+        if total_rows > preview_len {
+            writeln!(f, "... ({} more rows)", total_rows - preview_len)?;
+        }
+
+        write!(f, "Total rows: {total_rows}")
     }
 }
 

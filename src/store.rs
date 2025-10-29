@@ -6,8 +6,8 @@
 
 use crate::col::{Column, OttersColumn};
 use crate::record::OttersRecord;
-use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, Int64Array};
-use arrow::datatypes::{Field, Schema};
+use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, Int64Array, StringBuilder};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -284,6 +284,86 @@ impl OttersStoreBuilder {
 }
 
 impl OttersStore {
+    /// Create a store from an existing [`RecordBatch`], validating critical columns.
+    pub fn from_recordbatch(
+        batch: RecordBatch,
+        vector_column: impl Into<String>,
+    ) -> Result<Self, String> {
+        let vector_column = vector_column.into();
+        let schema = batch.schema();
+
+        let vector_index = schema
+            .index_of(&vector_column)
+            .map_err(|e| format!("Vector column '{vector_column}' missing: {e}"))?;
+        let vector_field = schema.field(vector_index);
+
+        let dim = match vector_field.data_type() {
+            DataType::FixedSizeList(field, dim) => {
+                if !matches!(field.data_type(), DataType::Float32) {
+                    return Err(format!(
+                        "Vector column '{vector_column}' must contain Float32 values; found {:?}",
+                        field.data_type()
+                    ));
+                }
+                if *dim <= 0 {
+                    return Err(format!(
+                        "Vector column '{vector_column}' must have positive dimension, found {dim}"
+                    ));
+                }
+                *dim
+            }
+            other => {
+                return Err(format!(
+                    "Vector column '{vector_column}' must be FixedSizeList<Float32>; found {other:?}"
+                ));
+            }
+        };
+
+        batch
+            .column(vector_index)
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .ok_or_else(|| {
+                format!("Vector column '{vector_column}' must be a FixedSizeListArray<Float32>")
+            })?;
+
+        let inv_norm_column = DEFAULT_INV_NORM_COL.to_string();
+        let inv_norm_index = schema
+            .index_of(&inv_norm_column)
+            .map_err(|e| format!("Inverse norm column '{inv_norm_column}' missing: {e}"))?;
+        let inv_norm_field = schema.field(inv_norm_index);
+        if !matches!(inv_norm_field.data_type(), DataType::Float32) {
+            return Err(format!(
+                "Inverse norm column '{inv_norm_column}' must be Float32; found {:?}",
+                inv_norm_field.data_type()
+            ));
+        }
+
+        let row_id_column = DEFAULT_ROW_ID_COL.to_string();
+        let row_id_index = schema
+            .index_of(&row_id_column)
+            .map_err(|e| format!("Row id column '{row_id_column}' missing: {e}"))?;
+        let row_id_field = schema.field(row_id_index);
+        if !matches!(row_id_field.data_type(), DataType::Int64) {
+            return Err(format!(
+                "Row id column '{row_id_column}' must be Int64; found {:?}",
+                row_id_field.data_type()
+            ));
+        }
+
+        Ok(OttersStore {
+            batch: OttersRecord::from(batch),
+            dim,
+            vector_column,
+            inv_norm_column,
+            row_id_column,
+            vector_index,
+            inv_norm_index,
+            row_id_index,
+            last_query_stats: Arc::new(Mutex::new(None)),
+        })
+    }
+
     /// Create a new builder for given dimension
     #[allow(clippy::new_ret_no_self)]
     pub fn new(dim: i32) -> OttersStoreBuilder {
@@ -310,15 +390,50 @@ impl OttersStore {
         self.batch.as_ref()
     }
 
-    /// Get schema
-    pub fn schema(&self) -> Arc<Schema> {
+    /// Clone the underlying [`RecordBatch`] for external use.
+    pub fn to_recordbatch(&self) -> RecordBatch {
+        self.batch.as_ref().clone()
+    }
+
+    /// Access the Arrow schema directly.
+    pub fn arrow_schema(&self) -> Arc<Schema> {
         self.batch.schema().clone()
+    }
+
+    /// Render the schema as a printable [`OttersRecord`].
+    pub fn schema(&self) -> OttersRecord {
+        let schema = self.batch.schema();
+        let mut name_builder = StringBuilder::new();
+        let mut type_builder = StringBuilder::new();
+
+        for field in schema.fields() {
+            name_builder.append_value(field.name());
+            let dtype_repr = format!("{:?}", field.data_type());
+            type_builder.append_value(&dtype_repr);
+        }
+
+        let schema_batch = Arc::new(Schema::new(vec![
+            Field::new("column", DataType::Utf8, false),
+            Field::new("data_type", DataType::Utf8, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema_batch,
+            vec![
+                Arc::new(name_builder.finish()) as ArrayRef,
+                Arc::new(type_builder.finish()) as ArrayRef,
+            ],
+        )
+        .expect("failed to build schema record");
+
+        OttersRecord::from(batch)
     }
 
     /// Get the vectors column as a convenience wrapper
     pub fn vectors(&self) -> OttersColumn {
-        let array = self.batch.column(self.vector_index).clone();
-        OttersColumn::from_arrow(&self.vector_column, array)
+        self.batch
+            .col(&self.vector_column)
+            .expect("vector column must exist")
     }
 
     /// Borrow the vectors as a FixedSizeListArray for zero-copy compute
@@ -350,9 +465,7 @@ impl OttersStore {
 
     /// Get a column by name
     pub fn column(&self, name: &str) -> Option<OttersColumn> {
-        let idx = self.batch.schema().index_of(name).ok()?;
-        let array = self.batch.column(idx).clone();
-        Some(OttersColumn::from_arrow(name, array))
+        self.batch.col(name)
     }
 
     /// Get all column names

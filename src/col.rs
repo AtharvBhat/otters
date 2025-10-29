@@ -46,6 +46,8 @@ pub struct OttersColumn {
     array: ArrayRef,
 }
 
+const COLUMN_DISPLAY_PREVIEW_ROWS: usize = 10;
+
 impl fmt::Debug for OttersColumn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OttersColumn")
@@ -61,6 +63,11 @@ impl OttersColumn {
     /// Create from existing Arrow array
     pub fn from_arrow(name: impl Into<String>, array: ArrayRef) -> Self {
         let field = Field::new(name, array.data_type().clone(), true);
+        Self::from_field(field, array)
+    }
+
+    /// Create from existing Arrow [`Field`] and array, preserving metadata.
+    pub fn from_field(field: Field, array: ArrayRef) -> Self {
         Self { field, array }
     }
 
@@ -111,75 +118,7 @@ impl OttersColumn {
 
     /// Display first n rows
     pub fn head_n(&self, n: usize) {
-        println!("Column: {} ({:?})", self.name(), self.field.data_type());
-        let limit = self.len().min(n);
-
-        for i in 0..limit {
-            if self.is_null(i) {
-                println!("  [{i}]: NULL");
-            } else {
-                match self.field.data_type() {
-                    DataType::Int32 => {
-                        let arr = self.array.as_any().downcast_ref::<Int32Array>().unwrap();
-                        let val = arr.value(i);
-                        println!("  [{i}]: {val}");
-                    }
-                    DataType::Int64 => {
-                        let arr = self.array.as_any().downcast_ref::<Int64Array>().unwrap();
-                        let val = arr.value(i);
-                        println!("  [{i}]: {val}");
-                    }
-                    DataType::Float32 => {
-                        let arr = self.array.as_any().downcast_ref::<Float32Array>().unwrap();
-                        let val = arr.value(i);
-                        println!("  [{i}]: {val:.4}");
-                    }
-                    DataType::Float64 => {
-                        let arr = self.array.as_any().downcast_ref::<Float64Array>().unwrap();
-                        let val = arr.value(i);
-                        println!("  [{i}]: {val:.4}");
-                    }
-                    DataType::Utf8 => {
-                        let arr = self.array.as_any().downcast_ref::<StringArray>().unwrap();
-                        let val = arr.value(i);
-                        println!("  [{i}]: \"{val}\"");
-                    }
-                    DataType::Timestamp(TimeUnit::Millisecond, _) => {
-                        let arr = self
-                            .array
-                            .as_any()
-                            .downcast_ref::<TimestampMillisecondArray>()
-                            .unwrap();
-                        let millis = arr.value(i);
-                        if let Some(dt) = DateTime::from_timestamp_millis(millis) {
-                            let formatted = dt.format("%Y-%m-%d %H:%M:%S UTC");
-                            println!("  [{i}]: {formatted} ({millis})");
-                        } else {
-                            println!("  [{i}]: Invalid timestamp ({millis})");
-                        }
-                    }
-                    DataType::FixedSizeList(_, dim) => {
-                        if let Some(vec) = self.vector_at(i) {
-                            let preview: Vec<String> =
-                                vec.iter().take(5).map(|v| format!("{v:.4}")).collect();
-                            let preview_str = preview.join(", ");
-                            if vec.len() > 5 {
-                                let more = vec.len() - 5;
-                                println!("  [{i}]: [{preview_str}, ... {more} more] (dim={dim})");
-                            } else {
-                                println!("  [{i}]: [{preview_str}] (dim={dim})");
-                            }
-                        }
-                    }
-                    _ => println!("  [{i}]: <unsupported type>"),
-                }
-            }
-        }
-
-        if self.len() > n {
-            let more = self.len() - n;
-            println!("  ... ({more} more rows)");
-        }
+        println!("{}", ColumnPreview::new(self, n));
     }
 
     /// Get typed values (i32)
@@ -236,6 +175,73 @@ impl OttersColumn {
         match self.field.data_type() {
             DataType::FixedSizeList(_, dim) => Some(*dim),
             _ => None,
+        }
+    }
+
+    fn format_value(&self, index: usize) -> String {
+        if self.is_null(index) {
+            return "NULL".to_string();
+        }
+
+        match self.field.data_type() {
+            DataType::Int32 => self
+                .array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(|arr| arr.value(index).to_string())
+                .unwrap_or_else(|| "<invalid Int32 column>".to_string()),
+            DataType::Int64 => self
+                .array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .map(|arr| arr.value(index).to_string())
+                .unwrap_or_else(|| "<invalid Int64 column>".to_string()),
+            DataType::Float32 => self
+                .array
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .map(|arr| format!("{:.4}", arr.value(index)))
+                .unwrap_or_else(|| "<invalid Float32 column>".to_string()),
+            DataType::Float64 => self
+                .array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(|arr| format!("{:.4}", arr.value(index)))
+                .unwrap_or_else(|| "<invalid Float64 column>".to_string()),
+            DataType::Utf8 => self
+                .array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|arr| format!("\"{}\"", arr.value(index)))
+                .unwrap_or_else(|| "<invalid Utf8 column>".to_string()),
+            DataType::Timestamp(TimeUnit::Millisecond, _) => self
+                .array
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .map(|arr| {
+                    let millis = arr.value(index);
+                    match DateTime::from_timestamp_millis(millis) {
+                        Some(dt) => format!("{} ({millis})", dt.format("%Y-%m-%d %H:%M:%S UTC")),
+                        None => format!("Invalid timestamp ({millis})"),
+                    }
+                })
+                .unwrap_or_else(|| "<invalid Timestamp column>".to_string()),
+            DataType::FixedSizeList(_, dim) => {
+                if let Some(vec) = self.vector_at(index) {
+                    let preview: Vec<String> =
+                        vec.iter().take(5).map(|v| format!("{v:.4}")).collect();
+                    let preview_str = preview.join(", ");
+                    if vec.len() > 5 {
+                        let more = vec.len() - 5;
+                        format!("[{preview_str}, ... {more} more] (dim={dim})")
+                    } else {
+                        format!("[{preview_str}] (dim={dim})")
+                    }
+                } else {
+                    "<invalid FixedSizeList column>".to_string()
+                }
+            }
+            _ => "<unsupported type>".to_string(),
         }
     }
 }
@@ -375,6 +381,43 @@ impl Column {
         };
 
         OttersColumn::from_arrow(self.name, array)
+    }
+}
+
+struct ColumnPreview<'a> {
+    column: &'a OttersColumn,
+    limit: usize,
+}
+
+impl<'a> ColumnPreview<'a> {
+    fn new(column: &'a OttersColumn, limit: usize) -> Self {
+        Self { column, limit }
+    }
+}
+
+impl fmt::Display for ColumnPreview<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let column = self.column;
+        let len = column.len();
+        let preview_len = len.min(self.limit);
+
+        writeln!(f, "Column: {} ({:?})", column.name(), column.dtype())?;
+
+        for idx in 0..preview_len {
+            writeln!(f, "  [{idx}]: {}", column.format_value(idx))?;
+        }
+
+        if len > preview_len {
+            writeln!(f, "  ... ({} more rows)", len - preview_len)?;
+        }
+
+        write!(f, "Total rows: {len}")
+    }
+}
+
+impl fmt::Display for OttersColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        ColumnPreview::new(self, COLUMN_DISPLAY_PREVIEW_ROWS).fmt(f)
     }
 }
 

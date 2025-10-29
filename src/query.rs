@@ -335,7 +335,7 @@ impl<'a> OttersQuery<'a> {
 
 fn compile_expr(store: &OttersStore, expr: Expr) -> Result<CompiledFilter, String> {
     let mut schema_map: HashMap<String, ExprDataType> = HashMap::new();
-    for field in store.schema().fields() {
+    for field in store.arrow_schema().fields() {
         if let Some(dtype) = arrow_to_otters_type(field.data_type()) {
             schema_map.insert(field.name().clone(), dtype);
         }
