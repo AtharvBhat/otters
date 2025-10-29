@@ -558,6 +558,15 @@ where
     }
 }
 
+impl<T> ColumnValues for Option<T>
+where
+    T: ColumnType,
+{
+    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        T::append_option(target.builder, self)
+    }
+}
+
 impl<T, const N: usize> ColumnValues for [Option<T>; N]
 where
     T: ColumnType,
@@ -607,12 +616,4 @@ fn parse_datetime_fmt(s: &str, format: &str) -> Result<i64, ColumnError> {
     Err(ColumnError::ParseError(format!(
         "Cannot parse '{s}' with format '{format}'"
     )))
-}
-impl<T> ColumnValues for Option<T>
-where
-    T: ColumnType,
-{
-    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
-        T::append_option(target.builder, self)
-    }
 }

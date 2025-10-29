@@ -10,7 +10,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use arrow::util::pretty::pretty_format_batches;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const DEFAULT_VECTOR_COL: &str = "embeddings";
 const DEFAULT_INV_NORM_COL: &str = "inv_norms";
@@ -34,6 +34,8 @@ pub struct OttersStore {
     vector_index: usize,
     inv_norm_index: usize,
     row_id_index: usize,
+    /// Stats from the most recent query execution
+    last_query_stats: Arc<Mutex<Option<RecordBatch>>>,
 }
 
 /// Builder for constructing an OttersStore
@@ -276,6 +278,7 @@ impl OttersStoreBuilder {
             vector_index,
             inv_norm_index,
             row_id_index,
+            last_query_stats: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -389,6 +392,21 @@ impl OttersStore {
     /// Get the name of the row id column
     pub fn row_id_column_name(&self) -> &str {
         &self.row_id_column
+    }
+
+    /// Retrieve the stats for the most recent query, if available.
+    pub fn get_last_query_stats(&self) -> Option<RecordBatch> {
+        self.last_query_stats
+            .lock()
+            .ok()
+            .and_then(|stats| stats.clone())
+    }
+
+    /// Update the stored stats for the last query.
+    pub(crate) fn set_last_query_stats(&self, stats: RecordBatch) {
+        if let Ok(mut guard) = self.last_query_stats.lock() {
+            *guard = Some(stats);
+        }
     }
 }
 

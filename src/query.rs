@@ -5,8 +5,8 @@
 //! prior to vector scoring.
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
-    TimestampMillisecondArray, UInt32Array,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Float64Builder, Int32Array,
+    Int64Array, Int64Builder, StringArray, StringBuilder, TimestampMillisecondArray, UInt32Array,
 };
 use arrow::compute::kernels::boolean::{and_kleene, or_kleene};
 use arrow::compute::kernels::filter::filter;
@@ -22,6 +22,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::expr::{
     CmpOp, ColumnFilter, CompiledFilter, DataType as ExprDataType, Expr, MetadataPlan, MetricExpr,
@@ -48,6 +49,28 @@ impl MetadataSelection {
 }
 
 const SCORE_COLUMN: &str = "score";
+
+#[derive(Debug, Clone)]
+pub struct MetadataColumnStats {
+    pub column: String,
+    pub evaluated: u64,
+    pub passed: u64,
+}
+
+impl MetadataColumnStats {
+    fn from_mask(column: String, mask: &BooleanArray) -> Self {
+        let evaluated = (mask.len() - mask.null_count()) as u64;
+        let passed = mask
+            .iter()
+            .filter(|value| matches!(value, Some(true)))
+            .count() as u64;
+        Self {
+            column,
+            evaluated,
+            passed,
+        }
+    }
+}
 
 /// Metric to use for vector similarity scoring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,11 +234,18 @@ impl<'a> OttersQuery<'a> {
             return Err(err);
         }
 
+        let total_start = Instant::now();
+        let mut duration_stats: Vec<(&str, f64)> = Vec::new();
+        let mut metadata_stats: Vec<MetadataColumnStats> = Vec::new();
+
         let query = query_vector.ok_or_else(|| "Query vector not provided".to_string())?;
         let inv_norm = query_inv_norm.unwrap_or_else(|| inverse_norm(&query));
 
         let compiled_filter = if let Some(expr) = filter_expr {
-            Some(compile_expr(store, expr)?)
+            let start = Instant::now();
+            let compiled = compile_expr(store, expr)?;
+            duration_stats.push(("compile_filter", duration_ms(start)));
+            Some(compiled)
         } else {
             None
         };
@@ -241,34 +271,58 @@ impl<'a> OttersQuery<'a> {
             (None, None) => QueryMetric::Cosine,
         };
 
-        let selection = apply_metadata_filters(store, &metadata_plan)?;
+        let metadata_start = Instant::now();
+        let (selection, mut metadata_counts) = apply_metadata_filters(store, &metadata_plan)?;
+        duration_stats.push(("apply_metadata_filters", duration_ms(metadata_start)));
+        metadata_stats.append(&mut metadata_counts);
 
+        let scoring_start = Instant::now();
         let scored = score_candidates(store, &query, inv_norm, metric, &selection, &metric_plan)?;
+        duration_stats.push(("score_candidates", duration_ms(scoring_start)));
+        let candidate_count = selection.row_ids.len() as u64;
 
-        if scored.is_empty() {
-            return build_empty_output(store);
-        }
+        let vector_stats;
+        let output = if scored.is_empty() {
+            let materialize_start = Instant::now();
+            let result = build_empty_output(store)?;
+            duration_stats.push(("materialize_output", duration_ms(materialize_start)));
+            vector_stats = (candidate_count, 0);
+            result
+        } else {
+            let prepare_start = Instant::now();
+            let (row_ids_array, scores_array) = build_score_arrays(&scored);
+            let sorted_indices =
+                sort_scores(&scores_array, metric, top_k).map_err(|e| e.to_string())?;
+            let sorted_row_ids =
+                take(row_ids_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
+            let sorted_scores =
+                take(scores_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
 
-        let (row_ids_array, scores_array) = build_score_arrays(&scored);
-        let sorted_indices =
-            sort_scores(&scores_array, metric, top_k).map_err(|e| e.to_string())?;
-        let sorted_row_ids =
-            take(row_ids_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
-        let sorted_scores =
-            take(scores_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
+            let row_ids = sorted_row_ids
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| "Failed to downcast sorted row ids".to_string())?
+                .clone();
+            let scores = sorted_scores
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| "Failed to downcast sorted scores".to_string())?
+                .clone();
+            duration_stats.push(("prepare_results", duration_ms(prepare_start)));
 
-        let row_ids = sorted_row_ids
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| "Failed to downcast sorted row ids".to_string())?
-            .clone();
-        let scores = sorted_scores
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .ok_or_else(|| "Failed to downcast sorted scores".to_string())?
-            .clone();
+            let materialize_start = Instant::now();
+            let result = materialize_output(store, row_ids, scores)?;
+            duration_stats.push(("materialize_output", duration_ms(materialize_start)));
+            vector_stats = (candidate_count, scored.len() as u64);
+            result
+        };
 
-        materialize_output(store, row_ids, scores)
+        duration_stats.push(("total_query", duration_ms(total_start)));
+        let stats_batch =
+            build_query_stats_batch(&duration_stats, &metadata_stats, Some(vector_stats))?;
+        store.set_last_query_stats(stats_batch);
+
+        Ok(output)
     }
 }
 
@@ -301,22 +355,38 @@ fn arrow_to_otters_type(data_type: &DataType) -> Option<ExprDataType> {
 pub fn apply_metadata_filters(
     store: &OttersStore,
     plan: &MetadataPlan,
-) -> Result<MetadataSelection, String> {
+) -> Result<(MetadataSelection, Vec<MetadataColumnStats>), String> {
     let batch = store.batch();
 
     if plan.is_empty() {
-        return Ok(MetadataSelection::all(
-            batch.num_rows(),
-            store.row_ids_array().clone(),
+        return Ok((
+            MetadataSelection::all(batch.num_rows(), store.row_ids_array().clone()),
+            Vec::new(),
         ));
     }
 
-    let clause_masks: Result<Vec<BooleanArray>, String> = plan
+    let clause_results: Result<Vec<(BooleanArray, Vec<MetadataColumnStats>)>, String> = plan
         .par_iter()
         .map(|clause| evaluate_clause(batch, clause))
         .collect();
 
-    let mut clause_masks = clause_masks?;
+    let mut clause_masks: Vec<BooleanArray> = Vec::new();
+    let mut stats_map: HashMap<String, MetadataColumnStats> = HashMap::new();
+    for (mask, clause_stats) in clause_results? {
+        for stat in clause_stats {
+            let entry = stats_map
+                .entry(stat.column.clone())
+                .or_insert(MetadataColumnStats {
+                    column: stat.column.clone(),
+                    evaluated: 0,
+                    passed: 0,
+                });
+            entry.evaluated += stat.evaluated;
+            entry.passed += stat.passed;
+        }
+        clause_masks.push(mask);
+    }
+
     debug_assert!(!clause_masks.is_empty());
 
     // Reduce clause masks with logical AND (since plan is AND of clauses)
@@ -328,10 +398,15 @@ pub fn apply_metadata_filters(
     }
 
     let filtered_ids = filter_int64(store.row_ids_array(), &combined)?;
-    Ok(MetadataSelection {
-        mask: combined,
-        row_ids: filtered_ids,
-    })
+    let mut aggregated_stats: Vec<MetadataColumnStats> = stats_map.into_values().collect();
+    aggregated_stats.sort_by(|a, b| a.column.cmp(&b.column));
+    Ok((
+        MetadataSelection {
+            mask: combined,
+            row_ids: filtered_ids,
+        },
+        aggregated_stats,
+    ))
 }
 
 /// Extract the metric-only plan from a compiled expression.
@@ -340,30 +415,42 @@ pub fn metric_plan_from(compiled: &crate::expr::CompiledFilter) -> MetricPlan {
     compiled.metric_plan()
 }
 
-fn evaluate_clause(batch: &RecordBatch, clause: &[ColumnFilter]) -> Result<BooleanArray, String> {
+fn evaluate_clause(
+    batch: &RecordBatch,
+    clause: &[ColumnFilter],
+) -> Result<(BooleanArray, Vec<MetadataColumnStats>), String> {
     let mut iter = clause.iter();
     let first = iter
         .next()
         .ok_or_else(|| "Clause must contain at least one predicate".to_string())?;
 
-    let mut mask = evaluate_filter(batch, first)?;
+    let (mut mask, first_stats) = evaluate_filter(batch, first)?;
+    let mut stats = vec![first_stats];
     for filter in iter {
-        let rhs = evaluate_filter(batch, filter)?;
+        let (rhs, rhs_stats) = evaluate_filter(batch, filter)?;
+        stats.push(rhs_stats);
         mask = or_kleene(&mask, &rhs).map_err(|e| e.to_string())?;
     }
 
-    Ok(mask)
+    Ok((mask, stats))
 }
 
-fn evaluate_filter(batch: &RecordBatch, filter: &ColumnFilter) -> Result<BooleanArray, String> {
+fn evaluate_filter(
+    batch: &RecordBatch,
+    filter: &ColumnFilter,
+) -> Result<(BooleanArray, MetadataColumnStats), String> {
     match filter {
         ColumnFilter::Numeric { column, cmp, rhs } => {
             let array = column_array(batch, column)?;
-            evaluate_numeric(array, *cmp, rhs)
+            let mask = evaluate_numeric(array, *cmp, rhs)?;
+            let stats = MetadataColumnStats::from_mask(column.clone(), &mask);
+            Ok((mask, stats))
         }
         ColumnFilter::String { column, cmp, rhs } => {
             let array = column_array(batch, column)?;
-            evaluate_utf8(array, *cmp, rhs)
+            let mask = evaluate_utf8(array, *cmp, rhs)?;
+            let stats = MetadataColumnStats::from_mask(column.clone(), &mask);
+            Ok((mask, stats))
         }
     }
 }
@@ -710,6 +797,64 @@ fn build_empty_output(store: &OttersStore) -> Result<QueryOutput, String> {
     let empty_ids = Int64Array::from(Vec::<i64>::new());
     let empty_scores = Float32Array::from(Vec::<f32>::new());
     materialize_output(store, empty_ids, empty_scores)
+}
+
+fn duration_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+fn build_query_stats_batch(
+    durations: &[(&str, f64)],
+    metadata_stats: &[MetadataColumnStats],
+    vector_stats: Option<(u64, u64)>,
+) -> Result<RecordBatch, String> {
+    let mut category_builder = StringBuilder::new();
+    let mut name_builder = StringBuilder::new();
+    let mut duration_builder = Float64Builder::new();
+    let mut evaluated_builder = Int64Builder::new();
+    let mut passed_builder = Int64Builder::new();
+
+    for (step, duration) in durations {
+        category_builder.append_value("duration");
+        name_builder.append_value(*step);
+        duration_builder.append_value(*duration);
+        evaluated_builder.append_null();
+        passed_builder.append_null();
+    }
+
+    for stat in metadata_stats {
+        category_builder.append_value("metadata_column");
+        name_builder.append_value(&stat.column);
+        duration_builder.append_null();
+        evaluated_builder.append_value(stat.evaluated as i64);
+        passed_builder.append_value(stat.passed as i64);
+    }
+
+    if let Some((evaluated, passed)) = vector_stats {
+        category_builder.append_value("vector_scoring");
+        name_builder.append_value("candidates_vs_passed");
+        duration_builder.append_null();
+        evaluated_builder.append_value(evaluated as i64);
+        passed_builder.append_value(passed as i64);
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("category", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("duration_ms", DataType::Float64, true),
+        Field::new("evaluated", DataType::Int64, true),
+        Field::new("passed", DataType::Int64, true),
+    ]));
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(category_builder.finish()) as ArrayRef,
+        Arc::new(name_builder.finish()) as ArrayRef,
+        Arc::new(duration_builder.finish()) as ArrayRef,
+        Arc::new(evaluated_builder.finish()) as ArrayRef,
+        Arc::new(passed_builder.finish()) as ArrayRef,
+    ];
+
+    RecordBatch::try_new(schema, columns).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

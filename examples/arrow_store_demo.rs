@@ -2,6 +2,7 @@
 //!
 //! Run with: cargo run --example arrow_store_demo
 
+use arrow::util::pretty::pretty_format_batches;
 use otters::expr::cosine;
 use otters::prelude::*;
 
@@ -87,11 +88,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let query_vector = vec![1.0, 0.0, 0.0, 0.0];
     let results = store
         .query(query_vector)
-        .filter(cosine().gt(0.75) & col("age").gte(28))
+        .filter(cosine().gt(0.7) & col("age").gte(28))
         .take(3)
         .collect()?;
 
-    println!("Top cosine matches (cosine >= 0.75 and age >= 28):\n{results}");
+    println!("Top cosine matches (cosine >= 0.7 and age >= 28):\n{results}");
+
+    if let Some(stats) = store.get_last_query_stats() {
+        println!("\nLast query timings:");
+        println!("{}", pretty_format_batches(&[stats])?);
+    }
 
     println!("\n=== Demo Complete ===");
 
