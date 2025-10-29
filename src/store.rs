@@ -13,8 +13,8 @@ use std::fmt;
 use std::sync::Arc;
 
 const DEFAULT_VECTOR_COL: &str = "embeddings";
-const DEFAULT_INV_NORM_COL: &str = "_inv_norms";
-const DEFAULT_ROW_ID_COL: &str = "_row_id";
+const DEFAULT_INV_NORM_COL: &str = "inv_norms";
+const DEFAULT_ROW_ID_COL: &str = "row_id";
 
 /// Unified store for vectors and metadata using Arrow RecordBatch
 #[derive(Debug, Clone)]
@@ -71,13 +71,13 @@ impl OttersStoreBuilder {
         self
     }
 
-    /// Set custom name for inverse-norm column (default: "_inv_norms")
+    /// Set custom name for inverse-norm column (default: "inv_norms")
     pub fn with_inv_norm_column_name(mut self, name: impl Into<String>) -> Self {
         self.inv_norm_column = name.into();
         self
     }
 
-    /// Set custom name for row-id column (default: "_row_id")
+    /// Set custom name for row-id column (default: "row_id")
     pub fn with_row_id_column_name(mut self, name: impl Into<String>) -> Self {
         self.row_id_column = name.into();
         self
@@ -110,18 +110,18 @@ impl OttersStoreBuilder {
         let mut row_builder = ColumnBuilder::new_int64(&self.row_id_column);
 
         for (row_id, vec) in vectors.iter().enumerate() {
-            if let Err(e) = vec_builder.append_vector(Some(vec.as_slice())) {
+            if let Err(e) = vec_builder.append(Some(vec.as_slice())) {
                 self.error = Some(e.to_string());
                 return self;
             }
 
             let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
             let inv = if norm != 0.0 { 1.0 / norm } else { 0.0 };
-            if let Err(e) = inv_builder.append_f32(Some(inv)) {
+            if let Err(e) = inv_builder.append(Some(inv)) {
                 self.error = Some(e.to_string());
                 return self;
             }
-            if let Err(e) = row_builder.append_i64(Some(row_id as i64)) {
+            if let Err(e) = row_builder.append(Some(row_id as i64)) {
                 self.error = Some(e.to_string());
                 return self;
             }

@@ -24,10 +24,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::expr::{
-    CmpOp, ColumnFilter, CompiledFilter, Expr, MetadataPlan, MetricExpr, MetricPlan,
+    CmpOp, ColumnFilter, CompiledFilter, DataType as ExprDataType, Expr, MetadataPlan, MetricExpr,
+    MetricPlan,
 };
 use crate::store::OttersStore;
-use crate::type_utils::DataType as OttersDataType;
 use crate::vec_compute::{
     cosine_similarity, dot_product, euclidean_distance_squared, inverse_norm,
 };
@@ -47,7 +47,7 @@ impl MetadataSelection {
     }
 }
 
-const SCORE_COLUMN: &str = "_score";
+const SCORE_COLUMN: &str = "score";
 
 /// Metric to use for vector similarity scoring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,7 +273,7 @@ impl<'a> OttersQuery<'a> {
 }
 
 fn compile_expr(store: &OttersStore, expr: Expr) -> Result<CompiledFilter, String> {
-    let mut schema_map: HashMap<String, OttersDataType> = HashMap::new();
+    let mut schema_map: HashMap<String, ExprDataType> = HashMap::new();
     for field in store.schema().fields() {
         if let Some(dtype) = arrow_to_otters_type(field.data_type()) {
             schema_map.insert(field.name().clone(), dtype);
@@ -282,15 +282,15 @@ fn compile_expr(store: &OttersStore, expr: Expr) -> Result<CompiledFilter, Strin
     expr.compile(&schema_map).map_err(|e| e.to_string())
 }
 
-fn arrow_to_otters_type(data_type: &DataType) -> Option<OttersDataType> {
+fn arrow_to_otters_type(data_type: &DataType) -> Option<ExprDataType> {
     match data_type {
-        DataType::Int32 => Some(OttersDataType::Int32),
-        DataType::Int64 => Some(OttersDataType::Int64),
-        DataType::Float32 => Some(OttersDataType::Float32),
-        DataType::Float64 => Some(OttersDataType::Float64),
-        DataType::Utf8 => Some(OttersDataType::String),
+        DataType::Int32 => Some(ExprDataType::Int32),
+        DataType::Int64 => Some(ExprDataType::Int64),
+        DataType::Float32 => Some(ExprDataType::Float32),
+        DataType::Float64 => Some(ExprDataType::Float64),
+        DataType::Utf8 => Some(ExprDataType::String),
         DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
-            Some(OttersDataType::DateTime)
+            Some(ExprDataType::DateTime)
         }
         _ => None,
     }
@@ -726,9 +726,9 @@ mod tests {
         ];
 
         let mut age_builder = ColumnBuilder::new_int32("age");
-        age_builder.append_i32(Some(25)).unwrap();
-        age_builder.append_i32(Some(35)).unwrap();
-        age_builder.append_i32(Some(45)).unwrap();
+        age_builder.append(Some(25)).unwrap();
+        age_builder.append(Some(35)).unwrap();
+        age_builder.append(Some(45)).unwrap();
         let ages = age_builder.collect();
 
         OttersStore::builder(3)
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!(output.batch.num_rows(), 2);
         let row_ids = output
             .batch
-            .column_by_name("_row_id")
+            .column_by_name(store.row_id_column_name())
             .unwrap()
             .as_any()
             .downcast_ref::<Int64Array>()
@@ -761,7 +761,7 @@ mod tests {
 
         let scores = output
             .batch
-            .column_by_name("_score")
+            .column_by_name(SCORE_COLUMN)
             .unwrap()
             .as_any()
             .downcast_ref::<Float32Array>()
@@ -782,7 +782,7 @@ mod tests {
         assert_eq!(output.batch.num_rows(), 1);
         let row_ids = output
             .batch
-            .column_by_name("_row_id")
+            .column_by_name(store.row_id_column_name())
             .unwrap()
             .as_any()
             .downcast_ref::<Int64Array>()
@@ -791,7 +791,7 @@ mod tests {
 
         let score = output
             .batch
-            .column_by_name("_score")
+            .column_by_name(SCORE_COLUMN)
             .unwrap()
             .as_any()
             .downcast_ref::<Float32Array>()

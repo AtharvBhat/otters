@@ -24,37 +24,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dim
     );
 
-    // Build metadata columns
+    // Build metadata columns in bulk
     let mut names_builder = ColumnBuilder::new_string("name");
-    names_builder.append_string(Some("Alice"))?;
-    names_builder.append_string(Some("Bob"))?;
-    names_builder.append_string(Some("Charlie"))?;
-    names_builder.append_string(Some("Diana"))?;
-    names_builder.append_string(Some("Eve"))?;
+    names_builder.append([
+        Some("Alice"),
+        Some("Bob"),
+        Some("Charlie"),
+        Some("Diana"),
+        Some("Eve"),
+    ])?;
     let names = names_builder.collect();
 
     let mut ages_builder = ColumnBuilder::new_int32("age");
-    ages_builder.append_i32(Some(25))?;
-    ages_builder.append_i32(Some(30))?;
-    ages_builder.append_i32(Some(35))?;
-    ages_builder.append_i32(Some(28))?;
-    ages_builder.append_i32(Some(32))?;
+    ages_builder.append([Some(25), Some(30), Some(35), Some(28), Some(32)])?;
     let ages = ages_builder.collect();
-
-    let mut scores_builder = ColumnBuilder::new_float64("score");
-    scores_builder.append_f64(Some(0.95))?;
-    scores_builder.append_f64(Some(0.87))?;
-    scores_builder.append_f64(Some(0.92))?;
-    scores_builder.append_f64(Some(0.88))?;
-    scores_builder.append_f64(Some(0.91))?;
-    let scores = scores_builder.collect();
 
     // Build the Arrow store
     let store = OttersStore::builder(dim)
         .with_vectors(vectors)
         .with_metadata_column("name", names)
         .with_metadata_column("age", ages)
-        .with_metadata_column("score", scores)
         .build()?;
 
     println!("Store created successfully!\n");
@@ -74,13 +63,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    println!("Table snapshot:\n{}", store);
+    println!("Table snapshot:\n{store}");
 
     // Get specific vector
     println!("Vector at index 0:");
     let vectors_col = store.vectors();
     if let Some(vec) = vectors_col.vector_at(0) {
-        println!("  {:?}", vec);
+        println!("  {vec:?}");
     }
     println!();
 
@@ -88,8 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Pre-computed inverse norms for cosine similarity:");
     for (i, inv_norm) in store.inv_norms_array().iter().enumerate().take(5) {
         match inv_norm {
-            Some(value) => println!("  [{}]: {:.6}", i, value),
-            None => println!("  [{}]: NULL", i),
+            Some(value) => println!("  [{i}]: {value:.6}"),
+            None => println!("  [{i}]: NULL"),
         }
     }
     println!();
@@ -102,10 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .take(3)
         .collect()?;
 
-    println!(
-        "Top cosine matches (score >= 0.75 and age >= 28):\n{}",
-        results
-    );
+    println!("Top cosine matches (cosine >= 0.75 and age >= 28):\n{results}");
 
     println!("\n=== Demo Complete ===");
 

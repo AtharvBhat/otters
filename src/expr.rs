@@ -39,7 +39,16 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
-use crate::type_utils::DataType;
+/// Logical data types understood by the expression compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataType {
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    String,
+    DateTime,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {

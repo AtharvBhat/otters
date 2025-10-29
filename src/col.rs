@@ -329,82 +329,18 @@ impl ColumnBuilder {
         self
     }
 
-    /// Append Int32 value
-    pub fn append_i32(&mut self, value: Option<i32>) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Int32(b) => {
-                b.append_option(value);
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Int32 builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append Int64 value
-    pub fn append_i64(&mut self, value: Option<i64>) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Int64(b) => {
-                b.append_option(value);
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Int64 builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append Float32 value
-    pub fn append_f32(&mut self, value: Option<f32>) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Float32(b) => {
-                b.append_option(value);
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Float32 builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append Float64 value
-    pub fn append_f64(&mut self, value: Option<f64>) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Float64(b) => {
-                b.append_option(value);
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Float64 builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append String value
-    pub fn append_string(&mut self, value: Option<&str>) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::String(b) => {
-                b.append_option(value);
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected String builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append Timestamp value (as milliseconds since epoch)
-    pub fn append_timestamp(&mut self, value: Option<i64>) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Timestamp(b) => {
-                b.append_option(value);
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Timestamp builder".to_string(),
-            )),
-        }
+    /// Append one or more values using a unified interface.
+    ///
+    /// Accepts single values (`builder.append(Some(value))?`) or collections
+    /// like slices/arrays of `Option<T>`.
+    pub fn append<V>(&mut self, values: V) -> Result<(), ColumnError>
+    where
+        V: ColumnValues,
+    {
+        let target = ColumnAppendTarget {
+            builder: &mut self.builder,
+        };
+        values.append_into(target)
     }
 
     /// Append datetime from string (auto-parses common formats)
@@ -420,118 +356,7 @@ impl ColumnBuilder {
                 Some(parsed)
             }
         };
-        self.append_timestamp(millis)
-    }
-
-    /// Append vector value (embedding)
-    pub fn append_vector(&mut self, value: Option<&[f32]>) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Vector(b) => {
-                match value {
-                    Some(vec) => {
-                        let values = b.values();
-                        values.extend(vec.iter().copied().map(Some));
-                        b.append(true);
-                    }
-                    None => {
-                        b.append(false);
-                    }
-                }
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Vector builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append many i32 values at once
-    pub fn append_i32_slice(&mut self, values: &[Option<i32>]) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Int32(b) => {
-                b.extend(values.iter().copied());
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Int32 builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append many i64 values at once
-    pub fn append_i64_slice(&mut self, values: &[Option<i64>]) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Int64(b) => {
-                b.extend(values.iter().copied());
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Int64 builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append many f32 values at once
-    pub fn append_f32_slice(&mut self, values: &[Option<f32>]) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Float32(b) => {
-                b.extend(values.iter().copied());
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Float32 builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append many f64 values at once
-    pub fn append_f64_slice(&mut self, values: &[Option<f64>]) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Float64(b) => {
-                b.extend(values.iter().copied());
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Float64 builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append many string values at once (bulk append)
-    pub fn append_string_slice(&mut self, values: &[Option<&str>]) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::String(b) => {
-                b.extend(values.iter().copied());
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected String builder".to_string(),
-            )),
-        }
-    }
-
-    /// Append many vectors at once (bulk append)
-    pub fn append_vector_slice(&mut self, values: &[Option<&[f32]>]) -> Result<(), ColumnError> {
-        match &mut self.builder {
-            BuilderEnum::Vector(b) => {
-                for &vec_opt in values {
-                    match vec_opt {
-                        Some(vec) => {
-                            let vals = b.values();
-                            vals.extend(vec.iter().copied().map(Some));
-                            b.append(true);
-                        }
-                        None => {
-                            b.append(false);
-                        }
-                    }
-                }
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Vector builder".to_string(),
-            )),
-        }
+        self.append([millis])
     }
 
     /// Build the final column (consumes the builder)
@@ -550,6 +375,195 @@ impl ColumnBuilder {
         };
 
         Column::from_arrow(self.name, array)
+    }
+}
+
+/// Public wrapper passed to `ColumnValues` implementations.
+pub struct ColumnAppendTarget<'a> {
+    builder: &'a mut BuilderEnum,
+}
+
+/// Internal helper implemented for types supported by [`ColumnBuilder::append`].
+trait ColumnType: Copy {
+    fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError>;
+
+    fn append_iter<I>(builder: &mut BuilderEnum, iter: I) -> Result<(), ColumnError>
+    where
+        I: IntoIterator<Item = Option<Self>>,
+    {
+        for value in iter {
+            Self::append_option(builder, value)?;
+        }
+        Ok(())
+    }
+
+    fn append_slice(builder: &mut BuilderEnum, values: &[Option<Self>]) -> Result<(), ColumnError>
+    where
+        Option<Self>: Copy,
+    {
+        for &value in values {
+            Self::append_option(builder, value)?;
+        }
+        Ok(())
+    }
+}
+
+/// Helper trait powering [`ColumnBuilder::append`].
+pub trait ColumnValues {
+    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError>;
+}
+
+macro_rules! impl_column_type_numeric {
+    ($ty:ty, $variant:ident, $err:literal) => {
+        impl ColumnType for $ty {
+            fn append_option(
+                builder: &mut BuilderEnum,
+                value: Option<Self>,
+            ) -> Result<(), ColumnError> {
+                match builder {
+                    BuilderEnum::$variant(b) => {
+                        b.append_option(value);
+                        Ok(())
+                    }
+                    _ => Err(ColumnError::TypeMismatch($err.to_string())),
+                }
+            }
+
+            fn append_slice(
+                builder: &mut BuilderEnum,
+                values: &[Option<Self>],
+            ) -> Result<(), ColumnError>
+            where
+                Option<Self>: Copy,
+            {
+                match builder {
+                    BuilderEnum::$variant(b) => {
+                        b.extend(values.iter().copied());
+                        Ok(())
+                    }
+                    _ => Err(ColumnError::TypeMismatch($err.to_string())),
+                }
+            }
+        }
+    };
+}
+
+impl_column_type_numeric!(i32, Int32, "Expected Int32 builder");
+impl_column_type_numeric!(f32, Float32, "Expected Float32 builder");
+impl_column_type_numeric!(f64, Float64, "Expected Float64 builder");
+
+impl ColumnType for i64 {
+    fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError> {
+        match builder {
+            BuilderEnum::Int64(b) => {
+                b.append_option(value);
+                Ok(())
+            }
+            BuilderEnum::Timestamp(b) => {
+                b.append_option(value);
+                Ok(())
+            }
+            _ => Err(ColumnError::TypeMismatch(
+                "Expected Int64 or Timestamp builder".to_string(),
+            )),
+        }
+    }
+
+    fn append_slice(builder: &mut BuilderEnum, values: &[Option<Self>]) -> Result<(), ColumnError>
+    where
+        Option<Self>: Copy,
+    {
+        match builder {
+            BuilderEnum::Int64(b) => {
+                b.extend(values.iter().copied());
+                Ok(())
+            }
+            BuilderEnum::Timestamp(b) => {
+                b.extend(values.iter().copied());
+                Ok(())
+            }
+            _ => Err(ColumnError::TypeMismatch(
+                "Expected Int64 or Timestamp builder".to_string(),
+            )),
+        }
+    }
+}
+
+impl ColumnType for &str {
+    fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError> {
+        match builder {
+            BuilderEnum::String(b) => {
+                b.append_option(value);
+                Ok(())
+            }
+            _ => Err(ColumnError::TypeMismatch(
+                "Expected String builder".to_string(),
+            )),
+        }
+    }
+
+    fn append_slice(builder: &mut BuilderEnum, values: &[Option<Self>]) -> Result<(), ColumnError>
+    where
+        Option<Self>: Copy,
+    {
+        match builder {
+            BuilderEnum::String(b) => {
+                b.extend(values.iter().copied());
+                Ok(())
+            }
+            _ => Err(ColumnError::TypeMismatch(
+                "Expected String builder".to_string(),
+            )),
+        }
+    }
+}
+
+impl ColumnType for &[f32] {
+    fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError> {
+        match builder {
+            BuilderEnum::Vector(b) => {
+                match value {
+                    Some(vec) => {
+                        let values = b.values();
+                        values.extend(vec.iter().copied().map(Some));
+                        b.append(true);
+                    }
+                    None => b.append(false),
+                }
+                Ok(())
+            }
+            _ => Err(ColumnError::TypeMismatch(
+                "Expected Vector builder".to_string(),
+            )),
+        }
+    }
+}
+
+impl<T> ColumnValues for &[Option<T>]
+where
+    T: ColumnType,
+    Option<T>: Copy,
+{
+    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        T::append_slice(target.builder, self)
+    }
+}
+
+impl<T> ColumnValues for Vec<Option<T>>
+where
+    T: ColumnType,
+{
+    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        T::append_iter(target.builder, self)
+    }
+}
+
+impl<T, const N: usize> ColumnValues for [Option<T>; N]
+where
+    T: ColumnType,
+{
+    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        T::append_iter(target.builder, IntoIterator::into_iter(self))
     }
 }
 
@@ -593,4 +607,12 @@ fn parse_datetime_fmt(s: &str, format: &str) -> Result<i64, ColumnError> {
     Err(ColumnError::ParseError(format!(
         "Cannot parse '{s}' with format '{format}'"
     )))
+}
+impl<T> ColumnValues for Option<T>
+where
+    T: ColumnType,
+{
+    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        T::append_option(target.builder, self)
+    }
 }
