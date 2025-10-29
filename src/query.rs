@@ -14,7 +14,6 @@ use arrow::compute::kernels::take::take;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
-use arrow::util::pretty::pretty_format_batches;
 use arrow_array::Datum;
 use arrow_ord::cmp as ord_cmp;
 use arrow_ord::sort::{SortOptions, sort_to_indices};
@@ -24,6 +23,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::display::DisplayBatch;
 use crate::expr::{
     CmpOp, ColumnFilter, CompiledFilter, DataType as ExprDataType, Expr, MetadataPlan, MetricExpr,
     MetricPlan,
@@ -113,7 +113,7 @@ struct ScoredRow {
 /// Final query output containing a projected RecordBatch with scores.
 #[derive(Debug, Clone)]
 pub struct QueryOutput {
-    pub batch: RecordBatch,
+    pub batch: DisplayBatch,
 }
 
 impl QueryOutput {
@@ -124,14 +124,21 @@ impl QueryOutput {
     pub fn is_empty(&self) -> bool {
         self.batch.num_rows() == 0
     }
+
+    /// Borrow the underlying record batch.
+    pub fn record_batch(&self) -> &RecordBatch {
+        self.batch.as_ref()
+    }
+
+    /// Consume the output and return the underlying record batch.
+    pub fn into_record_batch(self) -> RecordBatch {
+        self.batch.into_inner()
+    }
 }
 
 impl fmt::Display for QueryOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match pretty_format_batches(&[self.batch.clone()]) {
-            Ok(formatted) => write!(f, "{formatted}"),
-            Err(err) => write!(f, "Failed to format query results: {err}"),
-        }
+        write!(f, "{}", self.batch)
     }
 }
 
@@ -775,7 +782,9 @@ fn materialize_output(
 
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema, columns).map_err(|e| e.to_string())?;
-    Ok(QueryOutput { batch })
+    Ok(QueryOutput {
+        batch: DisplayBatch::from(batch),
+    })
 }
 
 fn to_u32_indices(row_ids: &Int64Array) -> Result<UInt32Array, String> {
@@ -807,7 +816,7 @@ fn build_query_stats_batch(
     durations: &[(&str, f64)],
     metadata_stats: &[MetadataColumnStats],
     vector_stats: Option<(u64, u64)>,
-) -> Result<RecordBatch, String> {
+) -> Result<DisplayBatch, String> {
     let mut category_builder = StringBuilder::new();
     let mut name_builder = StringBuilder::new();
     let mut duration_builder = Float64Builder::new();
@@ -854,7 +863,9 @@ fn build_query_stats_batch(
         Arc::new(passed_builder.finish()) as ArrayRef,
     ];
 
-    RecordBatch::try_new(schema, columns).map_err(|e| e.to_string())
+    RecordBatch::try_new(schema, columns)
+        .map(DisplayBatch::from)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

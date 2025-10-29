@@ -2,7 +2,6 @@
 //!
 //! Run with: cargo run --example arrow_store_demo
 
-use arrow::util::pretty::pretty_format_batches;
 use otters::expr::cosine;
 use otters::prelude::*;
 
@@ -96,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(stats) = store.get_last_query_stats() {
         println!("\nLast query timings:");
-        println!("{}", pretty_format_batches(&[stats])?);
+        println!("{stats}");
     }
 
     println!("\n=== Demo Complete ===");

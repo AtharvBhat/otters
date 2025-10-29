@@ -5,10 +5,10 @@
 //! are stored together in a single table.
 
 use crate::col::{Column, ColumnBuilder};
+use crate::display::DisplayBatch;
 use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, Int64Array};
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
-use arrow::util::pretty::pretty_format_batches;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +20,7 @@ const DEFAULT_ROW_ID_COL: &str = "row_id";
 #[derive(Debug, Clone)]
 pub struct OttersStore {
     /// RecordBatch containing all columns (vectors + metadata)
-    batch: RecordBatch,
+    batch: DisplayBatch,
 
     /// Dimension of vectors
     dim: i32,
@@ -35,7 +35,7 @@ pub struct OttersStore {
     inv_norm_index: usize,
     row_id_index: usize,
     /// Stats from the most recent query execution
-    last_query_stats: Arc<Mutex<Option<RecordBatch>>>,
+    last_query_stats: Arc<Mutex<Option<DisplayBatch>>>,
 }
 
 /// Builder for constructing an OttersStore
@@ -270,7 +270,7 @@ impl OttersStoreBuilder {
             .map_err(|e| format!("Row id column '{}' missing: {e}", self.row_id_column))?;
 
         Ok(OttersStore {
-            batch,
+            batch: DisplayBatch::from(batch),
             dim: self.dim,
             vector_column: self.vector_column,
             inv_norm_column: self.inv_norm_column,
@@ -306,7 +306,7 @@ impl OttersStore {
 
     /// Get the underlying RecordBatch
     pub fn batch(&self) -> &RecordBatch {
-        &self.batch
+        self.batch.as_ref()
     }
 
     /// Get schema
@@ -395,7 +395,7 @@ impl OttersStore {
     }
 
     /// Retrieve the stats for the most recent query, if available.
-    pub fn get_last_query_stats(&self) -> Option<RecordBatch> {
+    pub fn get_last_query_stats(&self) -> Option<DisplayBatch> {
         self.last_query_stats
             .lock()
             .ok()
@@ -403,7 +403,7 @@ impl OttersStore {
     }
 
     /// Update the stored stats for the last query.
-    pub(crate) fn set_last_query_stats(&self, stats: RecordBatch) {
+    pub(crate) fn set_last_query_stats(&self, stats: DisplayBatch) {
         if let Ok(mut guard) = self.last_query_stats.lock() {
             *guard = Some(stats);
         }
@@ -412,9 +412,6 @@ impl OttersStore {
 
 impl fmt::Display for OttersStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match pretty_format_batches(&[self.batch.clone()]) {
-            Ok(formatted) => write!(f, "{formatted}"),
-            Err(err) => write!(f, "Failed to format OttersStore: {err}"),
-        }
+        write!(f, "{}", self.batch)
     }
 }

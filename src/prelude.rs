@@ -15,4 +15,5 @@ pub use crate::vec_compute::{
 
 // Column functionality and expression DSL
 pub use crate::col::*;
+pub use crate::display::DisplayBatch;
 pub use crate::expr::*;
