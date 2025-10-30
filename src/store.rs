@@ -9,7 +9,10 @@
 
 use crate::col::{Column, OttersColumn};
 use crate::record::OttersRecord;
-use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, Int64Array, StringBuilder};
+use arrow::array::{
+    ArrayRef, FixedSizeListArray, Float32Array, Float64Array, GenericListArray, Int64Array,
+    LargeListArray, ListArray, OffsetSizeTrait, StringBuilder,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use arrow_array::Array;
@@ -19,6 +22,7 @@ use arrow_select::concat::concat_batches;
 use glob::glob;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::{HashMap, HashSet};
+use std::convert::TryFrom;
 use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
@@ -200,6 +204,79 @@ impl DraftState {
         Some(OttersColumn::from_field(field.clone(), array))
     }
 
+    fn ensure_embedding_column_is_vector(&mut self, name: &str) -> Result<(), String> {
+        let schema = self.schema();
+        let (col_index, field) = schema
+            .column_with_name(name)
+            .ok_or_else(|| format!("Embedding column '{name}' not found"))?;
+
+        let mut converted_batches = Vec::with_capacity(self.batches.len());
+        let mut converted_field: Option<Field> = None;
+        let mut expected_dim: Option<i32> = None;
+
+        for batch in &self.batches {
+            let array = batch.column(col_index).clone();
+            let converted = convert_embedding_array(field, &array)?;
+
+            if let Some(dim) = expected_dim {
+                if dim != converted.dim {
+                    return Err(format!(
+                        "Embedding column '{name}' has inconsistent vector dimensions: {dim} vs {}",
+                        converted.dim
+                    ));
+                }
+            } else {
+                expected_dim = Some(converted.dim);
+            }
+
+            if let Some(existing) = &converted_field {
+                if existing.data_type() != converted.field.data_type() {
+                    return Err(format!(
+                        "Embedding column '{name}' produced inconsistent data types during conversion"
+                    ));
+                }
+            } else {
+                converted_field = Some(converted.field.clone());
+            }
+
+            let mut columns = batch.columns().to_vec();
+            columns[col_index] = converted.array;
+            converted_batches.push(columns);
+        }
+
+        let new_field = converted_field.ok_or_else(|| {
+            format!("Embedding column '{name}' conversion produced no column data")
+        })?;
+
+        let mut new_fields = schema
+            .fields()
+            .iter()
+            .map(|field| (**field).clone())
+            .collect::<Vec<_>>();
+        new_fields[col_index] = new_field.clone();
+
+        let metadata = schema.metadata().clone();
+        let new_schema = Arc::new(Schema::new_with_metadata(new_fields, metadata));
+
+        self.batches = converted_batches
+            .into_iter()
+            .map(|columns| {
+                RecordBatch::try_new(new_schema.clone(), columns)
+                    .map_err(|e| format!("Failed to rebuild RecordBatch after conversion: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Normalize schema pointers across batches for consistency.
+        for batch in &mut self.batches[1..] {
+            if !Arc::ptr_eq(&batch.schema(), &new_schema) {
+                *batch = RecordBatch::try_new(new_schema.clone(), batch.columns().to_vec())
+                    .map_err(|e| format!("Failed to normalize batch schema: {e}"))?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn apply_renames(&mut self, renames: &HashMap<String, String>) -> Result<(), String> {
         if renames.is_empty() {
             return Ok(());
@@ -226,6 +303,207 @@ impl DraftState {
 
         Ok(())
     }
+}
+
+struct ConvertedEmbedding {
+    field: Field,
+    array: ArrayRef,
+    dim: i32,
+}
+
+fn convert_embedding_array(field: &Field, array: &ArrayRef) -> Result<ConvertedEmbedding, String> {
+    match array.data_type() {
+        DataType::FixedSizeList(inner, dim) => match inner.data_type() {
+            DataType::Float32 => Ok(convert_existing_fixed_size(field, array.clone(), *dim)),
+            DataType::Float64 => convert_fixed_size_float64(field, array, *dim),
+            other => Err(format!(
+                "Embedding column '{}' must contain Float32 or Float64 values, found {other:?}",
+                field.name()
+            )),
+        },
+        DataType::List(_) => {
+            let list = array
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| "Failed to downcast embedding column to ListArray".to_string())?;
+            convert_generic_list(field, list)
+        }
+        DataType::LargeList(_) => {
+            let list = array
+                .as_any()
+                .downcast_ref::<LargeListArray>()
+                .ok_or_else(|| {
+                    "Failed to downcast embedding column to LargeListArray".to_string()
+                })?;
+            convert_generic_list(field, list)
+        }
+        other => Err(format!(
+            "Embedding column '{}' must be a list of Float32/Float64 values, found {other:?}",
+            field.name()
+        )),
+    }
+}
+
+fn convert_existing_fixed_size(field: &Field, array: ArrayRef, dim: i32) -> ConvertedEmbedding {
+    let mut new_field = Field::new(
+        field.name().clone(),
+        array.data_type().clone(),
+        field.is_nullable(),
+    );
+    if !field.metadata().is_empty() {
+        new_field = new_field.with_metadata(field.metadata().clone());
+    }
+    ConvertedEmbedding {
+        field: new_field,
+        array,
+        dim,
+    }
+}
+
+fn convert_fixed_size_float64(
+    field: &Field,
+    array: &ArrayRef,
+    dim: i32,
+) -> Result<ConvertedEmbedding, String> {
+    let list = array
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or_else(|| "Failed to downcast embedding column to FixedSizeListArray".to_string())?;
+
+    let mut builder = Column::new_vector(field.name(), dim);
+    let mut buffer = Vec::with_capacity(dim as usize);
+
+    for row in 0..list.len() {
+        if list.is_null(row) {
+            return Err(format!(
+                "Embedding column '{}' contains null values; please clean the data before loading",
+                field.name()
+            ));
+        }
+
+        let values = list.value(row);
+        buffer.clear();
+        copy_numeric_values(&values, dim as usize, &mut buffer, field.name())?;
+        builder = builder.append([Some(buffer.as_slice())]);
+    }
+
+    let column = builder
+        .collect()
+        .map_err(|e| format!("Failed to rebuild embedding column '{}': {e}", field.name()))?;
+    let array = column.array().clone();
+    let mut new_field = Field::new(
+        field.name().clone(),
+        array.data_type().clone(),
+        field.is_nullable(),
+    );
+    if !field.metadata().is_empty() {
+        new_field = new_field.with_metadata(field.metadata().clone());
+    }
+
+    Ok(ConvertedEmbedding {
+        field: new_field,
+        array,
+        dim,
+    })
+}
+
+fn convert_generic_list<O: OffsetSizeTrait>(
+    field: &Field,
+    list: &GenericListArray<O>,
+) -> Result<ConvertedEmbedding, String> {
+    let name = field.name();
+    let dim = infer_list_dimension(list).ok_or_else(|| {
+        format!("Embedding column '{name}' contained no non-null rows to infer vector dimension")
+    })?;
+
+    let mut builder = Column::new_vector(name, dim);
+    let mut buffer = Vec::with_capacity(dim as usize);
+
+    for row in 0..list.len() {
+        if list.is_null(row) {
+            return Err(format!(
+                "Embedding column '{name}' contains null values; please clean the data before loading"
+            ));
+        }
+
+        let values = list.value(row);
+        if values.len() != dim as usize {
+            return Err(format!(
+                "Embedding column '{name}' row {row} had length {}, expected {dim}",
+                values.len()
+            ));
+        }
+
+        buffer.clear();
+        copy_numeric_values(&values, dim as usize, &mut buffer, name)?;
+        builder = builder.append([Some(buffer.as_slice())]);
+    }
+
+    let column = builder
+        .collect()
+        .map_err(|e| format!("Failed to rebuild embedding column '{name}': {e}"))?;
+    let array = column.array().clone();
+    let mut new_field = Field::new(
+        field.name().clone(),
+        array.data_type().clone(),
+        field.is_nullable(),
+    );
+    if !field.metadata().is_empty() {
+        new_field = new_field.with_metadata(field.metadata().clone());
+    }
+
+    Ok(ConvertedEmbedding {
+        field: new_field,
+        array,
+        dim,
+    })
+}
+
+fn infer_list_dimension<O: OffsetSizeTrait>(list: &GenericListArray<O>) -> Option<i32> {
+    for row in 0..list.len() {
+        if list.is_null(row) {
+            continue;
+        }
+        let values = list.value(row);
+        if let Ok(dim) = i32::try_from(values.len()) {
+            return Some(dim);
+        }
+    }
+    None
+}
+
+fn copy_numeric_values(
+    values: &ArrayRef,
+    expected: usize,
+    buffer: &mut Vec<f32>,
+    column_name: &str,
+) -> Result<(), String> {
+    if let Some(f64_values) = values.as_any().downcast_ref::<Float64Array>() {
+        if f64_values.len() != expected {
+            return Err(format!(
+                "Embedding column '{column_name}' length mismatch: expected {expected}, found {}",
+                f64_values.len()
+            ));
+        }
+        buffer.extend(f64_values.values().iter().map(|v| *v as f32));
+        return Ok(());
+    }
+
+    if let Some(f32_values) = values.as_any().downcast_ref::<Float32Array>() {
+        if f32_values.len() != expected {
+            return Err(format!(
+                "Embedding column '{column_name}' length mismatch: expected {expected}, found {}",
+                f32_values.len()
+            ));
+        }
+        buffer.extend(f32_values.values().iter().copied());
+        return Ok(());
+    }
+
+    Err(format!(
+        "Embedding column '{column_name}' contained unsupported numeric list type {:?}",
+        values.data_type()
+    ))
 }
 
 impl ReadyState {
@@ -766,19 +1044,21 @@ impl OttersStore {
 
         match &mut self.state {
             StoreState::Draft(draft) => {
+                draft.ensure_embedding_column_is_vector(&source)?;
+
                 let schema = draft.schema();
                 let field = schema
                     .column_with_name(&source)
                     .ok_or_else(|| format!("Embedding column '{source}' not found"))?
                     .1;
-                match field.data_type() {
+                if !matches!(
+                    field.data_type(),
                     DataType::FixedSizeList(inner, _)
-                        if matches!(inner.data_type(), DataType::Float32) => {}
-                    other => {
-                        return Err(format!(
-                            "Embedding column '{source}' must be FixedSizeList<Float32>, found {other:?}"
-                        ));
-                    }
+                        if matches!(inner.data_type(), DataType::Float32)
+                ) {
+                    return Err(format!(
+                        "Embedding column '{source}' must be FixedSizeList<Float32>"
+                    ));
                 }
 
                 if alias != source && schema.column_with_name(&alias).is_some() {
