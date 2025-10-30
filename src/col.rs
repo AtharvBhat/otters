@@ -251,6 +251,7 @@ pub struct Column {
     name: String,
     builder: BuilderEnum,
     datetime_format: Option<String>,
+    error: Option<ColumnError>,
 }
 
 enum BuilderEnum {
@@ -270,6 +271,7 @@ impl Column {
             name: name.into(),
             builder: BuilderEnum::Int32(PrimitiveBuilder::new()),
             datetime_format: None,
+            error: None,
         }
     }
 
@@ -279,6 +281,7 @@ impl Column {
             name: name.into(),
             builder: BuilderEnum::Int64(PrimitiveBuilder::new()),
             datetime_format: None,
+            error: None,
         }
     }
 
@@ -288,6 +291,7 @@ impl Column {
             name: name.into(),
             builder: BuilderEnum::Float32(PrimitiveBuilder::new()),
             datetime_format: None,
+            error: None,
         }
     }
 
@@ -297,6 +301,7 @@ impl Column {
             name: name.into(),
             builder: BuilderEnum::Float64(PrimitiveBuilder::new()),
             datetime_format: None,
+            error: None,
         }
     }
 
@@ -306,6 +311,7 @@ impl Column {
             name: name.into(),
             builder: BuilderEnum::String(StringBuilder::new()),
             datetime_format: None,
+            error: None,
         }
     }
 
@@ -315,6 +321,7 @@ impl Column {
             name: name.into(),
             builder: BuilderEnum::Timestamp(TimestampMillisecondBuilder::new()),
             datetime_format: None,
+            error: None,
         }
     }
 
@@ -326,6 +333,7 @@ impl Column {
             name: name.into(),
             builder: BuilderEnum::Vector(vector_builder),
             datetime_format: None,
+            error: None,
         }
     }
 
@@ -337,40 +345,64 @@ impl Column {
 
     /// Append one or more values using a unified interface.
     ///
-    /// Accepts single values (`builder.append(Some(value))?`) or collections
+    /// Accepts single values (`builder.append(Some(value))`) or collections
     /// like slices/arrays of `Option<T>`.
-    pub fn append<V>(&mut self, values: V) -> Result<(), ColumnError>
+    pub fn append<V>(&mut self, values: V) -> &mut Self
     where
         V: ColumnValues,
     {
+        if self.error.is_some() {
+            return self;
+        }
+
         let target = ColumnAppendTarget {
             builder: &mut self.builder,
         };
-        values.append_into(target)
+        if let Err(err) = values.append_into(target) {
+            self.error = Some(err);
+        }
+        self
     }
 
     /// Append datetime from string (auto-parses common formats)
-    pub fn append_datetime_str(&mut self, value: Option<&str>) -> Result<(), ColumnError> {
+    pub fn append_datetime_str(&mut self, value: Option<&str>) -> &mut Self {
         let millis = match value {
             None => None,
             Some(s) => {
                 let parsed = if let Some(fmt) = &self.datetime_format {
-                    parse_datetime_fmt(s, fmt)?
+                    parse_datetime_fmt(s, fmt)
                 } else {
-                    parse_datetime(s)?
+                    parse_datetime(s)
                 };
-                Some(parsed)
+                match parsed {
+                    Ok(ts) => Some(ts),
+                    Err(err) => {
+                        self.error = Some(err);
+                        return self;
+                    }
+                }
             }
         };
         self.append([millis])
     }
 
     /// Build the final column (consumes the builder)
-    pub fn collect(self) -> OttersColumn {
+    pub fn collect(self) -> Result<OttersColumn, ColumnError> {
         // finish() returns concrete array types, we need to wrap them in Arc for ArrayRef
         use std::sync::Arc;
 
-        let array: ArrayRef = match self.builder {
+        let Column {
+            name,
+            builder,
+            datetime_format: _,
+            error,
+        } = self;
+
+        if let Some(err) = error {
+            return Err(err);
+        }
+
+        let array: ArrayRef = match builder {
             BuilderEnum::Int32(mut b) => Arc::new(b.finish()),
             BuilderEnum::Int64(mut b) => Arc::new(b.finish()),
             BuilderEnum::Float32(mut b) => Arc::new(b.finish()),
@@ -380,7 +412,7 @@ impl Column {
             BuilderEnum::Vector(mut b) => Arc::new(b.finish()),
         };
 
-        OttersColumn::from_arrow(self.name, array)
+        Ok(OttersColumn::from_arrow(name, array))
     }
 }
 

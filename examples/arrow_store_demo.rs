@@ -32,18 +32,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("Charlie"),
         Some("Diana"),
         Some("Eve"),
-    ])?;
-    let names = names_builder.collect();
+    ]);
+    let names = names_builder.collect()?;
 
     let mut ages_builder = Column::new_int32("age");
-    ages_builder.append([Some(25), Some(30), Some(35), Some(28), Some(32)])?;
-    let ages = ages_builder.collect();
+    ages_builder.append([Some(25), Some(30), Some(35), Some(28), Some(32)]);
+    let ages = ages_builder.collect()?;
+
+    let mut vector_builder = Column::new_vector("embedding", dim);
+    for vec in &vectors {
+        vector_builder.append(Some(vec.as_slice()));
+    }
+    let embeddings = vector_builder.collect()?;
 
     // Build the Arrow store
-    let store = OttersStore::new(dim)
-        .with_vectors(vectors)
-        .with_metadata_column("name", names)
-        .with_metadata_column("age", ages)
+    let store = OttersStore::new(["name", "age", "embedding"], [names, ages, embeddings])
+        .with_embedding_column("embedding")
         .build()?;
 
     println!("Store created successfully!\n");
@@ -64,8 +68,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate adapting an existing Arrow RecordBatch into a new OttersStore
     println!("Reconstructing store from existing RecordBatch...");
-    let batch = store.to_recordbatch();
-    let restored = OttersStore::from_recordbatch(batch, store.vector_column_name())?;
+    let batch = store.to_recordbatch().expect("store already built");
+    let restored = OttersStore::from_recordbatch(batch)
+        .with_embedding_column(store.vector_column_name())
+        .build()?;
     println!("Restored store schema:\n{}", restored.schema());
     println!();
 

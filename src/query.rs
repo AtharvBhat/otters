@@ -142,15 +142,6 @@ impl fmt::Display for QueryOutput {
     }
 }
 
-impl OttersStore {
-    /// Start a new query plan for the provided query vector.
-    pub fn query(&self, vector: Vec<f32>) -> OttersQuery<'_> {
-        let mut plan = OttersQuery::new(self);
-        plan.set_query_vector(vector);
-        plan
-    }
-}
-
 /// Builder for executing vector + metadata queries against an [`OttersStore`].
 pub struct OttersQuery<'a> {
     store: &'a OttersStore,
@@ -163,7 +154,15 @@ pub struct OttersQuery<'a> {
 }
 
 impl<'a> OttersQuery<'a> {
-    fn new(store: &'a OttersStore) -> Self {
+    pub(crate) fn new(store: &'a OttersStore) -> Self {
+        let error = if store.is_ready() {
+            None
+        } else if let Some(err) = store.pending_error() {
+            Some(err.clone())
+        } else {
+            Some("Store not built: call build() before querying".to_string())
+        };
+
         Self {
             store,
             query_vector: None,
@@ -171,11 +170,11 @@ impl<'a> OttersQuery<'a> {
             metric: None,
             filter_expr: None,
             top_k: None,
-            error: None,
+            error,
         }
     }
 
-    fn set_query_vector(&mut self, vector: Vec<f32>) {
+    pub(crate) fn set_query_vector(&mut self, vector: Vec<f32>) {
         if self.error.is_some() {
             return;
         }
@@ -363,7 +362,9 @@ pub fn apply_metadata_filters(
     store: &OttersStore,
     plan: &MetadataPlan,
 ) -> Result<(MetadataSelection, Vec<MetadataColumnStats>), String> {
-    let batch = store.batch();
+    let batch = store
+        .batch()
+        .expect("store must be built before applying metadata filters");
 
     if plan.is_empty() {
         return Ok((
@@ -762,7 +763,9 @@ fn materialize_output(
     scores: Float32Array,
 ) -> Result<QueryOutput, String> {
     let indices = to_u32_indices(&row_ids)?;
-    let store_batch = store.batch();
+    let store_batch = store
+        .batch()
+        .expect("store must be built before materializing output");
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(store_batch.num_columns() + 1);
 
     for column in store_batch.columns() {
@@ -881,15 +884,20 @@ mod tests {
             vec![0.6, 0.4, 0.0],
         ];
 
-        let mut age_builder = Column::new_int32("age");
-        age_builder.append(Some(25)).unwrap();
-        age_builder.append(Some(35)).unwrap();
-        age_builder.append(Some(45)).unwrap();
-        let ages = age_builder.collect();
+        let mut vector_builder = Column::new_vector("embedding", 3);
+        for vec in &vectors {
+            vector_builder.append(Some(vec.as_slice()));
+        }
+        let embeddings = vector_builder.collect().unwrap();
 
-        OttersStore::new(3)
-            .with_vectors(vectors)
-            .with_metadata_column("age", ages)
+        let mut age_builder = Column::new_int32("age");
+        age_builder.append(Some(25));
+        age_builder.append(Some(35));
+        age_builder.append(Some(45));
+        let ages = age_builder.collect().unwrap();
+
+        OttersStore::new(["embedding", "age"], [embeddings, ages])
+            .with_embedding_column("embedding")
             .build()
             .unwrap()
     }

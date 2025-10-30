@@ -4,7 +4,7 @@
 //! `use otters::prelude::*;`.
 
 // Main store type
-pub use crate::store::{OttersStore, OttersStoreBuilder};
+pub use crate::store::OttersStore;
 // Query planner
 pub use crate::query::{OttersQuery, QueryMetric};
 

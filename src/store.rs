@@ -1,408 +1,584 @@
-//! Unified Arrow-based store for vectors and metadata
+//! Unified Arrow-based store for vectors and metadata with lazy build stages.
 //!
-//! Combines vector search with metadata filtering using Apache Arrow's
-//! RecordBatch for true columnar storage. All data (embeddings, metadata)
-//! are stored together in a single table.
+//! OttersStore can be created from Arrow data (Parquet, CSV, RecordBatches, or
+//! in-memory columns). The store starts in a **draft** state where the schema
+//! can be inspected, column names can be tweaked, and the embedding column can
+//! be selected. Queries are only available once `build()` has been called,
+//! which finalizes the store by computing row ids, inverse norms, and caching
+//! column indexes.
 
 use crate::col::{Column, OttersColumn};
 use crate::record::OttersRecord;
 use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, Int64Array, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use arrow_array::Array;
+use arrow_csv::ReaderBuilder;
+use arrow_csv::reader::Format;
+use arrow_select::concat::concat_batches;
+use glob::glob;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const DEFAULT_VECTOR_COL: &str = "embeddings";
 const DEFAULT_INV_NORM_COL: &str = "inv_norms";
 const DEFAULT_ROW_ID_COL: &str = "row_id";
 
-/// Unified store for vectors and metadata using Arrow RecordBatch
-#[derive(Debug, Clone)]
-pub struct OttersStore {
-    /// RecordBatch containing all columns (vectors + metadata)
-    batch: OttersRecord,
-
-    /// Dimension of vectors
-    dim: i32,
-
-    /// Column names tracked for quick access
-    vector_column: String,
-    inv_norm_column: String,
-    row_id_column: String,
-
-    /// Cached column indices for fast lookup
-    vector_index: usize,
-    inv_norm_index: usize,
-    row_id_index: usize,
-    /// Stats from the most recent query execution
-    last_query_stats: Arc<Mutex<Option<OttersRecord>>>,
+/// Helper selection type for choosing and optionally renaming the embedding column.
+pub enum EmbeddingSelection {
+    Source(String),
+    SourceAs { source: String, alias: String },
 }
 
-/// Builder for constructing an OttersStore
-pub struct OttersStoreBuilder {
-    dim: i32,
-    vector_column: String,
-    inv_norm_column: String,
-    row_id_column: String,
-    vectors: Option<OttersColumn>,
-    inv_norms: Option<OttersColumn>,
-    row_ids: Option<OttersColumn>,
-    metadata: Vec<(String, OttersColumn)>,
+impl From<String> for EmbeddingSelection {
+    fn from(value: String) -> Self {
+        EmbeddingSelection::Source(value)
+    }
+}
+
+impl<'a> From<&'a str> for EmbeddingSelection {
+    fn from(value: &'a str) -> Self {
+        EmbeddingSelection::Source(value.to_string())
+    }
+}
+
+impl<'a> From<&'a String> for EmbeddingSelection {
+    fn from(value: &'a String) -> Self {
+        EmbeddingSelection::Source(value.clone())
+    }
+}
+
+impl<S: Into<String>, T: Into<String>> From<(S, T)> for EmbeddingSelection {
+    fn from(value: (S, T)) -> Self {
+        EmbeddingSelection::SourceAs {
+            source: value.0.into(),
+            alias: value.1.into(),
+        }
+    }
+}
+
+/// Unified store for vectors and metadata using Arrow RecordBatch.
+pub struct OttersStore {
+    state: StoreState,
+    vector_column_name: String,
+    inv_norm_column_name: String,
+    row_id_column_name: String,
     error: Option<String>,
 }
 
-impl OttersStoreBuilder {
-    /// Create a new builder for vectors of given dimension
-    pub fn new(dim: i32) -> Self {
+impl Clone for OttersStore {
+    fn clone(&self) -> Self {
         Self {
-            dim,
-            vector_column: DEFAULT_VECTOR_COL.to_string(),
-            inv_norm_column: DEFAULT_INV_NORM_COL.to_string(),
-            row_id_column: DEFAULT_ROW_ID_COL.to_string(),
-            vectors: None,
-            inv_norms: None,
-            row_ids: None,
-            metadata: Vec::new(),
-            error: None,
+            state: self.state.clone(),
+            vector_column_name: self.vector_column_name.clone(),
+            inv_norm_column_name: self.inv_norm_column_name.clone(),
+            row_id_column_name: self.row_id_column_name.clone(),
+            error: self.error.clone(),
         }
     }
+}
 
-    /// Set custom name for vector column (default: "embeddings")
-    pub fn with_vector_column_name(mut self, name: impl Into<String>) -> Self {
-        self.vector_column = name.into();
-        self
+impl fmt::Debug for OttersStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OttersStore")
+            .field("state", &self.state)
+            .field("vector_column_name", &self.vector_column_name)
+            .field("inv_norm_column_name", &self.inv_norm_column_name)
+            .field("row_id_column_name", &self.row_id_column_name)
+            .field("error", &self.error)
+            .finish()
     }
+}
 
-    /// Set custom name for inverse-norm column (default: "inv_norms")
-    pub fn with_inv_norm_column_name(mut self, name: impl Into<String>) -> Self {
-        self.inv_norm_column = name.into();
-        self
-    }
+#[derive(Clone, Debug)]
+enum StoreState {
+    Draft(DraftState),
+    Ready(ReadyState),
+}
 
-    /// Set custom name for row-id column (default: "row_id")
-    pub fn with_row_id_column_name(mut self, name: impl Into<String>) -> Self {
-        self.row_id_column = name.into();
-        self
-    }
+#[derive(Clone, Debug, Default)]
+struct DraftState {
+    batches: Vec<RecordBatch>,
+    selected_embedding_column: Option<String>,
+}
 
-    /// Add vectors from a Vec<Vec<f32>>
-    pub fn with_vectors(mut self, vectors: Vec<Vec<f32>>) -> Self {
-        if self.error.is_some() {
-            return self;
+#[derive(Clone, Debug)]
+struct ReadyState {
+    batch: OttersRecord,
+    dim: i32,
+    vector_index: usize,
+    inv_norm_index: usize,
+    row_id_index: usize,
+    last_query_stats: Arc<Mutex<Option<OttersRecord>>>,
+}
+
+impl DraftState {
+    fn new(mut batches: Vec<RecordBatch>) -> Result<Self, String> {
+        if batches.is_empty() {
+            return Err("No record batches available".to_string());
         }
 
-        if vectors.is_empty() {
-            self.error = Some("Cannot add empty vector list".to_string());
-            return self;
-        }
-
-        for (i, vec) in vectors.iter().enumerate() {
-            if vec.len() != self.dim as usize {
-                self.error = Some(format!(
-                    "Vector at index {i} has dimension {}, expected {}",
-                    vec.len(),
-                    self.dim
-                ));
-                return self;
+        let schema = batches[0].schema();
+        for batch in &batches[1..] {
+            if batch.schema().fields().len() != schema.fields().len() || batch.schema() != schema {
+                return Err("Input batches have mismatched schemas".to_string());
             }
         }
 
-        let mut vec_builder = Column::new_vector(&self.vector_column, self.dim);
-        let mut inv_builder = Column::new_float32(&self.inv_norm_column);
-        let mut row_builder = Column::new_int64(&self.row_id_column);
-
-        for (row_id, vec) in vectors.iter().enumerate() {
-            if let Err(e) = vec_builder.append(Some(vec.as_slice())) {
-                self.error = Some(e.to_string());
-                return self;
-            }
-
-            let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let inv = if norm != 0.0 { 1.0 / norm } else { 0.0 };
-            if let Err(e) = inv_builder.append(Some(inv)) {
-                self.error = Some(e.to_string());
-                return self;
-            }
-            if let Err(e) = row_builder.append(Some(row_id as i64)) {
-                self.error = Some(e.to_string());
-                return self;
+        // Normalize batches to share the same schema instance for easier equality checks.
+        for batch in &mut batches[1..] {
+            if !Arc::ptr_eq(&batch.schema(), &schema) {
+                *batch = RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
+                    .map_err(|e| format!("Failed to normalize batch schema: {e}"))?;
             }
         }
 
-        self.vectors = Some(vec_builder.collect());
-        self.inv_norms = Some(inv_builder.collect());
-        self.row_ids = Some(row_builder.collect());
-        self
-    }
-
-    fn is_reserved_name(&self, name: &str) -> bool {
-        name == self.vector_column || name == self.inv_norm_column || name == self.row_id_column
-    }
-
-    /// Add a metadata column
-    pub fn with_metadata_column(mut self, name: impl Into<String>, column: OttersColumn) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-
-        let name = name.into();
-        if self.is_reserved_name(&name) {
-            self.error = Some(format!(
-                "Metadata column name '{name}' conflicts with reserved store columns"
-            ));
-            return self;
-        }
-        self.metadata.push((name, column));
-        self
-    }
-
-    /// Add multiple metadata columns
-    pub fn with_metadata_columns(
-        mut self,
-        columns: impl IntoIterator<Item = (String, OttersColumn)>,
-    ) -> Self {
-        if self.error.is_some() {
-            return self;
-        }
-
-        for (name, column) in columns {
-            if self.is_reserved_name(&name) {
-                self.error = Some(format!(
-                    "Metadata column name '{name}' conflicts with reserved store columns"
-                ));
-                return self;
-            }
-            self.metadata.push((name, column));
-        }
-        self
-    }
-
-    /// Build the final store
-    pub fn build(self) -> Result<OttersStore, String> {
-        if let Some(err) = self.error {
-            return Err(err);
-        }
-
-        let vectors = self
-            .vectors
-            .ok_or_else(|| "Vectors not provided".to_string())?;
-
-        let inv_norms = self
-            .inv_norms
-            .ok_or_else(|| "Inverse norms not computed".to_string())?;
-
-        let row_ids = self
-            .row_ids
-            .ok_or_else(|| "Row ids not generated".to_string())?;
-
-        let len = vectors.len();
-
-        if inv_norms.len() != len {
-            return Err(format!(
-                "Inverse norms length {} does not match vectors length {}",
-                inv_norms.len(),
-                len
-            ));
-        }
-
-        if row_ids.len() != len {
-            return Err(format!(
-                "Row ids length {} does not match vectors length {}",
-                row_ids.len(),
-                len
-            ));
-        }
-
-        // Validate all metadata columns have same length
-        for (name, col) in &self.metadata {
-            if col.len() != len {
-                return Err(format!(
-                    "Metadata column '{}' has length {}, expected {}",
-                    name,
-                    col.len(),
-                    len
-                ));
-            }
-        }
-
-        // Build schema and arrays for RecordBatch
-        let mut fields = Vec::with_capacity(3 + self.metadata.len());
-        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(3 + self.metadata.len());
-
-        // Add row id column first for stable indexing
-        fields.push(row_ids.field().clone());
-        arrays.push(row_ids.array().clone());
-
-        // Add vector column
-        fields.push(vectors.field().clone());
-        arrays.push(vectors.array().clone());
-
-        // Add inverse norms
-        fields.push(inv_norms.field().clone());
-        arrays.push(inv_norms.array().clone());
-
-        // Add metadata columns
-        for (name, col) in self.metadata {
-            // Ensure field name matches the key
-            let mut field = col.field().clone();
-            if field.name() != &name {
-                field = Field::new(name, field.data_type().clone(), field.is_nullable());
-            }
-            fields.push(field);
-            arrays.push(col.array().clone());
-        }
-
-        let schema = Arc::new(Schema::new(fields));
-        let batch = RecordBatch::try_new(schema.clone(), arrays)
-            .map_err(|e| format!("Failed to create RecordBatch: {e}"))?;
-
-        let vector_index = schema
-            .index_of(&self.vector_column)
-            .map_err(|e| format!("Vector column '{}' missing: {e}", self.vector_column))?;
-        let inv_norm_index = schema.index_of(&self.inv_norm_column).map_err(|e| {
-            format!(
-                "Inverse norm column '{}' missing: {e}",
-                self.inv_norm_column
-            )
-        })?;
-        let row_id_index = schema
-            .index_of(&self.row_id_column)
-            .map_err(|e| format!("Row id column '{}' missing: {e}", self.row_id_column))?;
-
-        Ok(OttersStore {
-            batch: OttersRecord::from(batch),
-            dim: self.dim,
-            vector_column: self.vector_column,
-            inv_norm_column: self.inv_norm_column,
-            row_id_column: self.row_id_column,
-            vector_index,
-            inv_norm_index,
-            row_id_index,
-            last_query_stats: Arc::new(Mutex::new(None)),
+        Ok(Self {
+            batches,
+            selected_embedding_column: None,
         })
+    }
+
+    fn schema(&self) -> Arc<Schema> {
+        self.batches
+            .first()
+            .map(|batch| batch.schema())
+            .unwrap_or_else(|| Arc::new(Schema::new(Vec::<Field>::new())))
+    }
+
+    fn len(&self) -> usize {
+        self.batches.iter().map(|batch| batch.num_rows()).sum()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn column(&self, name: &str) -> Option<OttersColumn> {
+        let batch = self.batches.first()?;
+        let schema = batch.schema();
+        let (index, field) = schema.column_with_name(name)?;
+        let array = batch.column(index).clone();
+        Some(OttersColumn::from_field(field.clone(), array))
+    }
+
+    fn apply_renames(&mut self, renames: &HashMap<String, String>) -> Result<(), String> {
+        if renames.is_empty() {
+            return Ok(());
+        }
+
+        let schema = self.schema();
+        for from in renames.keys() {
+            if schema.column_with_name(from).is_none() {
+                return Err(format!("Cannot rename missing column '{from}'"));
+            }
+        }
+
+        self.batches = self
+            .batches
+            .iter()
+            .map(|batch| rename_batch(batch, renames))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if let Some(selected) = &mut self.selected_embedding_column {
+            if let Some(new_name) = renames.get(selected) {
+                *selected = new_name.clone();
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl ReadyState {
+    fn schema(&self) -> Arc<Schema> {
+        self.batch.schema().clone()
+    }
+
+    fn len(&self) -> usize {
+        self.batch.num_rows()
     }
 }
 
 impl OttersStore {
-    /// Create a store from an existing [`RecordBatch`], validating critical columns.
-    pub fn from_recordbatch(
-        batch: RecordBatch,
-        vector_column: impl Into<String>,
-    ) -> Result<Self, String> {
-        let vector_column = vector_column.into();
-        let schema = batch.schema();
+    fn empty() -> Self {
+        Self {
+            state: StoreState::Draft(DraftState::default()),
+            vector_column_name: DEFAULT_VECTOR_COL.to_string(),
+            inv_norm_column_name: DEFAULT_INV_NORM_COL.to_string(),
+            row_id_column_name: DEFAULT_ROW_ID_COL.to_string(),
+            error: None,
+        }
+    }
 
-        let vector_index = schema
-            .index_of(&vector_column)
-            .map_err(|e| format!("Vector column '{vector_column}' missing: {e}"))?;
-        let vector_field = schema.field(vector_index);
+    fn record_error(&mut self, err: impl Into<String>) {
+        if self.error.is_none() {
+            self.error = Some(err.into());
+        }
+    }
 
-        let dim = match vector_field.data_type() {
-            DataType::FixedSizeList(field, dim) => {
-                if !matches!(field.data_type(), DataType::Float32) {
-                    return Err(format!(
-                        "Vector column '{vector_column}' must contain Float32 values; found {:?}",
-                        field.data_type()
+    fn assign_draft_batches(&mut self, batches: Vec<RecordBatch>) {
+        match DraftState::new(batches) {
+            Ok(draft) => self.state = StoreState::Draft(draft),
+            Err(err) => self.record_error(err),
+        }
+    }
+
+    /// Load one or more Parquet files into an `OttersStore` in draft form.
+    pub fn from_parquet(pattern: impl AsRef<str>) -> Self {
+        let mut store = Self::empty();
+
+        match expand_glob(pattern.as_ref()) {
+            Ok(paths) => {
+                if paths.is_empty() {
+                    store.record_error(format!(
+                        "No parquet files matched pattern '{}'",
+                        pattern.as_ref()
                     ));
+                    return store;
                 }
-                if *dim <= 0 {
-                    return Err(format!(
-                        "Vector column '{vector_column}' must have positive dimension, found {dim}"
+
+                let mut batches = Vec::new();
+                for path in paths {
+                    match read_parquet_batches(&path) {
+                        Ok(mut file_batches) => batches.append(&mut file_batches),
+                        Err(err) => {
+                            store.record_error(err);
+                            return store;
+                        }
+                    }
+                }
+
+                store.assign_draft_batches(batches);
+            }
+            Err(err) => store.record_error(err),
+        }
+
+        store
+    }
+
+    /// Load one or more CSV files into an `OttersStore` in draft form.
+    ///
+    /// Schema inference follows Arrow's default CSV reader rules (header row enabled).
+    pub fn from_csv(pattern: impl AsRef<str>) -> Self {
+        let mut store = Self::empty();
+
+        match expand_glob(pattern.as_ref()) {
+            Ok(paths) => {
+                if paths.is_empty() {
+                    store.record_error(format!(
+                        "No CSV files matched pattern '{}'",
+                        pattern.as_ref()
                     ));
+                    return store;
                 }
-                *dim
+
+                let mut batches = Vec::new();
+                for path in paths {
+                    match read_csv_batches(&path) {
+                        Ok(mut file_batches) => batches.append(&mut file_batches),
+                        Err(err) => {
+                            store.record_error(err);
+                            return store;
+                        }
+                    }
+                }
+
+                store.assign_draft_batches(batches);
             }
-            other => {
-                return Err(format!(
-                    "Vector column '{vector_column}' must be FixedSizeList<Float32>; found {other:?}"
-                ));
+            Err(err) => store.record_error(err),
+        }
+
+        store
+    }
+
+    /// Create a draft store from an existing [`RecordBatch`].
+    pub fn from_recordbatch(batch: RecordBatch) -> Self {
+        Self::from_recordbatches(vec![batch])
+    }
+
+    /// Create a draft store from multiple [`RecordBatch`] instances.
+    pub fn from_recordbatches(batches: Vec<RecordBatch>) -> Self {
+        let mut store = Self::empty();
+        store.assign_draft_batches(batches);
+        store
+    }
+
+    /// Build a store from in-memory columns.
+    ///
+    /// Example:
+    /// ```
+    /// # use otters::col::Column;
+    /// # use otters::store::OttersStore;
+    /// let ages = Column::new_int32("age").collect().unwrap();
+    /// let names = Column::new_string("name").collect().unwrap();
+    /// let embeddings = Column::new_vector("embedding", 3).collect().unwrap();
+    /// let store = OttersStore::new(
+    ///     ["age", "name", "embedding"],
+    ///     [ages, names, embeddings],
+    /// )
+    /// .with_embedding_column("embedding")
+    /// .build()
+    /// .unwrap();
+    /// ```
+    pub fn new<S, D>(schema: S, data: D) -> Self
+    where
+        S: IntoIterator,
+        S::Item: Into<String>,
+        D: IntoIterator<Item = OttersColumn>,
+    {
+        let names: Vec<String> = schema.into_iter().map(Into::into).collect();
+        let mut columns: Vec<OttersColumn> = data.into_iter().collect();
+        let mut store = Self::empty();
+
+        if names.len() != columns.len() {
+            store.record_error(format!(
+                "Schema column count {} does not match data column count {}",
+                names.len(),
+                columns.len()
+            ));
+            return store;
+        }
+
+        if names.is_empty() {
+            store.record_error("Cannot build store with empty schema".to_string());
+            return store;
+        }
+
+        let len = columns.first().map(|col| col.len()).unwrap_or(0);
+        for (idx, column) in columns.iter().enumerate() {
+            if column.len() != len {
+                store.record_error(format!(
+                    "Column '{}' length {} does not match expected length {}",
+                    names[idx],
+                    column.len(),
+                    len
+                ))
             }
+        }
+        if store.error.is_some() {
+            return store;
+        }
+
+        for (name, column) in names.iter().zip(columns.iter_mut()) {
+            if column.name() != name {
+                let field = Field::new(
+                    name.clone(),
+                    column.dtype().clone(),
+                    column.field().is_nullable(),
+                );
+                *column = OttersColumn::from_field(field, column.array().clone());
+            }
+        }
+
+        let arrays: Vec<ArrayRef> = columns.into_iter().map(|col| col.array().clone()).collect();
+        let fields: Vec<Field> = names
+            .iter()
+            .zip(arrays.iter())
+            .map(|(name, array)| Field::new(name.clone(), array.data_type().clone(), true))
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+
+        match RecordBatch::try_new(schema.clone(), arrays) {
+            Ok(batch) => store.assign_draft_batches(vec![batch]),
+            Err(err) => store.record_error(format!("Failed to create RecordBatch: {err}")),
+        }
+
+        store
+    }
+
+    /// Select the embedding column, optionally renaming it in the finalized store.
+    ///
+    /// Examples:
+    /// - `store.with_embedding_column("embedding");`
+    /// - `store.with_embedding_column(("embedding", "vec"));`
+    pub fn with_embedding_column(mut self, selection: impl Into<EmbeddingSelection>) -> Self {
+        if self.error.is_none() {
+            if let Err(err) = self.set_embedding_column(selection.into()) {
+                self.record_error(err);
+            }
+        }
+        self
+    }
+
+    /// Configure the generated inverse norm column name in the finalized store.
+    pub fn with_inv_norm_column_name(mut self, name: impl Into<String>) -> Self {
+        if self.error.is_none() {
+            if let Err(err) = self.set_inv_norm_column_name(name.into()) {
+                self.record_error(err);
+            }
+        }
+        self
+    }
+
+    /// Configure the generated row id column name in the finalized store.
+    pub fn with_row_id_column_name(mut self, name: impl Into<String>) -> Self {
+        if self.error.is_none() {
+            if let Err(err) = self.set_row_id_column_name(name.into()) {
+                self.record_error(err);
+            }
+        }
+        self
+    }
+
+    /// Finalize the draft store, computing cached state required for querying.
+    pub fn build(mut self) -> Result<Self, String> {
+        self.build_mut()?;
+        Ok(self)
+    }
+
+    /// Finalize the draft store in-place.
+    pub fn build_mut(&mut self) -> Result<(), String> {
+        if let Some(err) = self.error.clone() {
+            return Err(err);
+        }
+
+        if matches!(self.state, StoreState::Ready(_)) {
+            return Err("Store already built".to_string());
+        }
+
+        let draft = match &self.state {
+            StoreState::Draft(d) => d,
+            StoreState::Ready(_) => unreachable!("checked above"),
         };
 
-        batch
-            .column(vector_index)
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .ok_or_else(|| {
-                format!("Vector column '{vector_column}' must be a FixedSizeListArray<Float32>")
+        let ready = finalize_store(
+            draft,
+            &self.vector_column_name,
+            &self.inv_norm_column_name,
+            &self.row_id_column_name,
+        )?;
+
+        self.state = StoreState::Ready(ready);
+        Ok(())
+    }
+
+    /// Rename one or more columns by providing an iterator of `(from, to)` pairs.
+    pub fn rename_columns<I, K, V>(&mut self, renames: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        if let Some(err) = &self.error {
+            return Err(err.clone());
+        }
+
+        let map: HashMap<String, String> = renames
+            .into_iter()
+            .map(|(from, to)| (from.into(), to.into()))
+            .collect();
+
+        if map.is_empty() {
+            return Ok(());
+        }
+
+        let schema = self.arrow_schema();
+        for from in map.keys() {
+            if schema.column_with_name(from).is_none() {
+                return Err(format!("Cannot rename missing column '{from}'"));
+            }
+        }
+
+        let current_vector = self.vector_column_name.clone();
+        let current_inv = self.inv_norm_column_name.clone();
+        let current_row = self.row_id_column_name.clone();
+        let new_vector = map
+            .get(&current_vector)
+            .cloned()
+            .unwrap_or(current_vector.clone());
+        let new_inv = map
+            .get(&current_inv)
+            .cloned()
+            .unwrap_or(current_inv.clone());
+        let new_row = map
+            .get(&current_row)
+            .cloned()
+            .unwrap_or(current_row.clone());
+
+        if new_vector == new_inv || new_vector == new_row || new_inv == new_row {
+            return Err("Renaming would cause reserved columns to share the same name".to_string());
+        }
+
+        match &mut self.state {
+            StoreState::Draft(draft) => draft.apply_renames(&map)?,
+            StoreState::Ready(ready) => apply_ready_renames(ready, &map)?,
+        }
+
+        self.update_special_names(&map);
+
+        if let StoreState::Ready(ready) = &mut self.state {
+            let schema = ready.batch.schema();
+            ready.vector_index = schema.index_of(&self.vector_column_name).map_err(|e| {
+                format!(
+                    "Vector column '{}' missing after rename: {e}",
+                    self.vector_column_name
+                )
             })?;
-
-        let inv_norm_column = DEFAULT_INV_NORM_COL.to_string();
-        let inv_norm_index = schema
-            .index_of(&inv_norm_column)
-            .map_err(|e| format!("Inverse norm column '{inv_norm_column}' missing: {e}"))?;
-        let inv_norm_field = schema.field(inv_norm_index);
-        if !matches!(inv_norm_field.data_type(), DataType::Float32) {
-            return Err(format!(
-                "Inverse norm column '{inv_norm_column}' must be Float32; found {:?}",
-                inv_norm_field.data_type()
-            ));
+            ready.inv_norm_index = schema.index_of(&self.inv_norm_column_name).map_err(|e| {
+                format!(
+                    "Inverse norm column '{}' missing after rename: {e}",
+                    self.inv_norm_column_name
+                )
+            })?;
+            ready.row_id_index = schema.index_of(&self.row_id_column_name).map_err(|e| {
+                format!(
+                    "Row id column '{}' missing after rename: {e}",
+                    self.row_id_column_name
+                )
+            })?;
         }
-
-        let row_id_column = DEFAULT_ROW_ID_COL.to_string();
-        let row_id_index = schema
-            .index_of(&row_id_column)
-            .map_err(|e| format!("Row id column '{row_id_column}' missing: {e}"))?;
-        let row_id_field = schema.field(row_id_index);
-        if !matches!(row_id_field.data_type(), DataType::Int64) {
-            return Err(format!(
-                "Row id column '{row_id_column}' must be Int64; found {:?}",
-                row_id_field.data_type()
-            ));
-        }
-
-        Ok(OttersStore {
-            batch: OttersRecord::from(batch),
-            dim,
-            vector_column,
-            inv_norm_column,
-            row_id_column,
-            vector_index,
-            inv_norm_index,
-            row_id_index,
-            last_query_stats: Arc::new(Mutex::new(None)),
-        })
+        Ok(())
     }
 
-    /// Create a new builder for given dimension
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(dim: i32) -> OttersStoreBuilder {
-        OttersStoreBuilder::new(dim)
+    /// Returns `true` if the store has been built and is ready for querying.
+    pub fn is_ready(&self) -> bool {
+        self.error.is_none() && matches!(self.state, StoreState::Ready(_))
     }
 
-    /// Get number of rows
-    pub fn len(&self) -> usize {
-        self.batch.num_rows()
-    }
-
-    /// Check if store is empty
+    /// Returns `true` if the store has no rows.
     pub fn is_empty(&self) -> bool {
-        self.batch.num_rows() == 0
+        match &self.state {
+            StoreState::Draft(draft) => draft.is_empty(),
+            StoreState::Ready(ready) => ready.len() == 0,
+        }
     }
 
-    /// Get vector dimension
+    pub(crate) fn pending_error(&self) -> Option<&String> {
+        self.error.as_ref()
+    }
+
+    /// Number of rows currently loaded.
+    pub fn len(&self) -> usize {
+        match &self.state {
+            StoreState::Draft(draft) => draft.len(),
+            StoreState::Ready(ready) => ready.len(),
+        }
+    }
+
+    /// Dimension of the embedding vectors. Requires the store to be built.
     pub fn dim(&self) -> i32 {
-        self.dim
+        self.ensure_ready()
+            .expect("Store not built: call build() before accessing dim")
+            .dim
     }
 
-    /// Get the underlying RecordBatch
-    pub fn batch(&self) -> &RecordBatch {
-        self.batch.as_ref()
-    }
-
-    /// Clone the underlying [`RecordBatch`] for external use.
-    pub fn to_recordbatch(&self) -> RecordBatch {
-        self.batch.as_ref().clone()
-    }
-
-    /// Access the Arrow schema directly.
+    /// Retrieve the underlying Arrow schema.
     pub fn arrow_schema(&self) -> Arc<Schema> {
-        self.batch.schema().clone()
+        match &self.state {
+            StoreState::Draft(draft) => draft.schema(),
+            StoreState::Ready(ready) => ready.schema(),
+        }
     }
 
     /// Render the schema as a printable [`OttersRecord`].
     pub fn schema(&self) -> OttersRecord {
-        let schema = self.batch.schema();
+        let schema = self.arrow_schema();
         let mut name_builder = StringBuilder::new();
         let mut type_builder = StringBuilder::new();
 
@@ -429,103 +605,518 @@ impl OttersStore {
         OttersRecord::from(batch)
     }
 
-    /// Get the vectors column as a convenience wrapper
+    /// Returns the selected embedding column name (after build this is the finalized name).
+    pub fn vector_column_name(&self) -> &str {
+        &self.vector_column_name
+    }
+
+    /// Returns the configured inverse norm column name.
+    pub fn inv_norm_column_name(&self) -> &str {
+        &self.inv_norm_column_name
+    }
+
+    /// Returns the configured row id column name.
+    pub fn row_id_column_name(&self) -> &str {
+        &self.row_id_column_name
+    }
+
+    /// Get a column by name (available in both draft and ready states).
+    pub fn column(&self, name: &str) -> Option<OttersColumn> {
+        match &self.state {
+            StoreState::Draft(draft) => draft.column(name),
+            StoreState::Ready(ready) => ready.batch.col(name),
+        }
+    }
+
+    /// Get all column names.
+    pub fn column_names(&self) -> Vec<String> {
+        self.arrow_schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    }
+
+    /// Get metadata column names (exclude vector, inv norms, and row id).
+    pub fn metadata_columns(&self) -> Vec<String> {
+        self.column_names()
+            .into_iter()
+            .filter(|name| {
+                name != &self.vector_column_name
+                    && name != &self.inv_norm_column_name
+                    && name != &self.row_id_column_name
+            })
+            .collect()
+    }
+
+    /// Get the vectors column as a convenience wrapper. Requires the store to be built.
     pub fn vectors(&self) -> OttersColumn {
-        self.batch
-            .col(&self.vector_column)
+        self.ensure_ready()
+            .expect("Store not built: call build() before accessing vectors")
+            .batch
+            .col(&self.vector_column_name)
             .expect("vector column must exist")
     }
 
-    /// Borrow the vectors as a FixedSizeListArray for zero-copy compute
+    /// Borrow the vectors as a [`FixedSizeListArray`]. Requires the store to be built.
     pub fn vectors_array(&self) -> &FixedSizeListArray {
-        self.batch
-            .column(self.vector_index)
+        self.ensure_ready()
+            .expect("Store not built: call build() before accessing vectors")
+            .batch
+            .column(self.vector_index())
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
             .expect("vector column must be FixedSizeListArray")
     }
 
-    /// Borrow the inverse norms column as a Float32Array
+    /// Borrow the inverse norms column as a [`Float32Array`]. Requires the store to be built.
     pub fn inv_norms_array(&self) -> &Float32Array {
-        self.batch
-            .column(self.inv_norm_index)
+        self.ensure_ready()
+            .expect("Store not built: call build() before accessing inv_norms")
+            .batch
+            .column(self.inv_norm_index())
             .as_any()
             .downcast_ref::<Float32Array>()
             .expect("inv norm column must be Float32Array")
     }
 
-    /// Borrow the row id column as an Int64Array
+    /// Borrow the row id column as an [`Int64Array`]. Requires the store to be built.
     pub fn row_ids_array(&self) -> &Int64Array {
-        self.batch
-            .column(self.row_id_index)
+        self.ensure_ready()
+            .expect("Store not built: call build() before accessing row ids")
+            .batch
+            .column(self.row_id_index())
             .as_any()
             .downcast_ref::<Int64Array>()
             .expect("row id column must be Int64Array")
     }
 
-    /// Get a column by name
-    pub fn column(&self, name: &str) -> Option<OttersColumn> {
-        self.batch.col(name)
+    /// Get the underlying [`RecordBatch`] for ready stores.
+    pub fn batch(&self) -> Option<&RecordBatch> {
+        match &self.state {
+            StoreState::Draft(_) => None,
+            StoreState::Ready(ready) => Some(ready.batch.as_ref()),
+        }
     }
 
-    /// Get all column names
-    pub fn column_names(&self) -> Vec<String> {
-        self.batch
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect()
-    }
-
-    /// Get metadata column names (exclude vector, inv norms, and row id)
-    pub fn metadata_columns(&self) -> Vec<String> {
-        self.batch
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .filter(|name| {
-                name != &self.vector_column
-                    && name != &self.inv_norm_column
-                    && name != &self.row_id_column
-            })
-            .collect()
-    }
-
-    /// Get the name of the vector column
-    pub fn vector_column_name(&self) -> &str {
-        &self.vector_column
-    }
-
-    /// Get the name of the inverse norm column
-    pub fn inv_norm_column_name(&self) -> &str {
-        &self.inv_norm_column
-    }
-
-    /// Get the name of the row id column
-    pub fn row_id_column_name(&self) -> &str {
-        &self.row_id_column
+    /// Clone the underlying [`RecordBatch`] when ready.
+    pub fn to_recordbatch(&self) -> Option<RecordBatch> {
+        self.batch().cloned()
     }
 
     /// Retrieve the stats for the most recent query, if available.
     pub fn get_last_query_stats(&self) -> Option<OttersRecord> {
-        self.last_query_stats
-            .lock()
+        self.ensure_ready()
             .ok()
-            .and_then(|stats| stats.clone())
+            .and_then(|ready| ready.last_query_stats.lock().ok()?.clone())
     }
 
     /// Update the stored stats for the last query.
     pub(crate) fn set_last_query_stats(&self, stats: OttersRecord) {
-        if let Ok(mut guard) = self.last_query_stats.lock() {
-            *guard = Some(stats);
+        if let Ok(ready) = self.ensure_ready() {
+            if let Ok(mut guard) = ready.last_query_stats.lock() {
+                *guard = Some(stats);
+            }
+        }
+    }
+
+    /// Start a new query plan for the provided query vector.
+    pub fn query(&self, vector: Vec<f32>) -> crate::query::OttersQuery<'_> {
+        let mut plan = crate::query::OttersQuery::new(self);
+        plan.set_query_vector(vector);
+        plan
+    }
+
+    fn set_embedding_column(&mut self, selection: EmbeddingSelection) -> Result<(), String> {
+        let (source, alias) = match selection {
+            EmbeddingSelection::Source(source) => {
+                let alias = source.clone();
+                (source, alias)
+            }
+            EmbeddingSelection::SourceAs { source, alias } => (source, alias),
+        };
+        self.apply_embedding_selection(source, alias)
+    }
+
+    fn apply_embedding_selection(&mut self, source: String, alias: String) -> Result<(), String> {
+        if alias.is_empty() {
+            return Err("Embedding column name cannot be empty".to_string());
+        }
+        if alias == self.row_id_column_name || alias == self.inv_norm_column_name {
+            return Err("Embedding column name cannot match reserved column names".to_string());
+        }
+
+        match &mut self.state {
+            StoreState::Draft(draft) => {
+                let schema = draft.schema();
+                let field = schema
+                    .column_with_name(&source)
+                    .ok_or_else(|| format!("Embedding column '{source}' not found"))?
+                    .1;
+                match field.data_type() {
+                    DataType::FixedSizeList(inner, _)
+                        if matches!(inner.data_type(), DataType::Float32) => {}
+                    other => {
+                        return Err(format!(
+                            "Embedding column '{source}' must be FixedSizeList<Float32>, found {other:?}"
+                        ));
+                    }
+                }
+
+                if alias != source && schema.column_with_name(&alias).is_some() {
+                    return Err(format!(
+                        "Column name '{alias}' already exists; rename it before assigning as the embedding column"
+                    ));
+                }
+
+                draft.selected_embedding_column = Some(source);
+                self.vector_column_name = alias;
+                Ok(())
+            }
+            StoreState::Ready(_) => {
+                Err("Store already built; embedding column cannot be changed".to_string())
+            }
+        }
+    }
+
+    fn set_inv_norm_column_name(&mut self, name: String) -> Result<(), String> {
+        if matches!(self.state, StoreState::Ready(_)) {
+            return Err(
+                "Cannot change inverse norm column name after build; use rename_columns instead"
+                    .to_string(),
+            );
+        }
+        if name.is_empty() {
+            return Err("Inverse norm column name cannot be empty".to_string());
+        }
+        if name == self.vector_column_name || name == self.row_id_column_name {
+            return Err("Inverse norm column name cannot match reserved column names".to_string());
+        }
+        self.inv_norm_column_name = name;
+        Ok(())
+    }
+
+    fn set_row_id_column_name(&mut self, name: String) -> Result<(), String> {
+        if matches!(self.state, StoreState::Ready(_)) {
+            return Err(
+                "Cannot change row id column name after build; use rename_columns instead"
+                    .to_string(),
+            );
+        }
+        if name.is_empty() {
+            return Err("Row id column name cannot be empty".to_string());
+        }
+        if name == self.vector_column_name || name == self.inv_norm_column_name {
+            return Err("Row id column name cannot match reserved column names".to_string());
+        }
+        self.row_id_column_name = name;
+        Ok(())
+    }
+
+    fn vector_index(&self) -> usize {
+        self.ensure_ready().expect("Store not built").vector_index
+    }
+
+    fn inv_norm_index(&self) -> usize {
+        self.ensure_ready().expect("Store not built").inv_norm_index
+    }
+
+    fn row_id_index(&self) -> usize {
+        self.ensure_ready().expect("Store not built").row_id_index
+    }
+
+    fn ensure_ready(&self) -> Result<&ReadyState, String> {
+        if let Some(err) = &self.error {
+            return Err(err.clone());
+        }
+        match &self.state {
+            StoreState::Ready(ready) => Ok(ready),
+            StoreState::Draft(_) => {
+                Err("Store not built: call build() before querying".to_string())
+            }
+        }
+    }
+
+    fn update_special_names(&mut self, renames: &HashMap<String, String>) {
+        if let Some(new_name) = renames.get(&self.vector_column_name) {
+            self.vector_column_name = new_name.clone();
+        }
+        if let Some(new_name) = renames.get(&self.inv_norm_column_name) {
+            self.inv_norm_column_name = new_name.clone();
+        }
+        if let Some(new_name) = renames.get(&self.row_id_column_name) {
+            self.row_id_column_name = new_name.clone();
         }
     }
 }
 
 impl fmt::Display for OttersStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.batch)
+        match &self.state {
+            StoreState::Draft(draft) => {
+                writeln!(
+                    f,
+                    "OttersStore<Draft>: rows={}, columns={}",
+                    draft.len(),
+                    draft.schema().fields().len()
+                )?;
+                if let Some(err) = &self.error {
+                    writeln!(f, "Pending error: {err}")?;
+                }
+                writeln!(
+                    f,
+                    "Call build() after selecting an embedding column to enable querying."
+                )?;
+                Ok(())
+            }
+            StoreState::Ready(ready) => write!(f, "{}", ready.batch),
+        }
     }
+}
+
+fn finalize_store(
+    draft: &DraftState,
+    vector_column_name: &str,
+    inv_norm_column_name: &str,
+    row_id_column_name: &str,
+) -> Result<ReadyState, String> {
+    let embedding_name = draft.selected_embedding_column.as_ref().ok_or_else(|| {
+        "Embedding column not set. Call with_embedding_column() before build().".to_string()
+    })?;
+
+    let schema = draft.schema();
+    let embedding_index = schema
+        .index_of(embedding_name)
+        .map_err(|e| format!("Embedding column '{embedding_name}' missing: {e}"))?;
+    let embedding_field = schema.field(embedding_index);
+
+    let (inner_field, dim) = match embedding_field.data_type() {
+        DataType::FixedSizeList(field, dim) => {
+            if !matches!(field.data_type(), DataType::Float32) {
+                return Err(format!(
+                    "Embedding column '{embedding_name}' must contain Float32 values; found {:?}",
+                    field.data_type()
+                ));
+            }
+            (field.clone(), *dim)
+        }
+        other => {
+            return Err(format!(
+                "Embedding column '{embedding_name}' must be FixedSizeList<Float32>; found {other:?}"
+            ));
+        }
+    };
+
+    let combined = concat_batches(&schema, &draft.batches)
+        .map_err(|e| format!("Failed to concatenate batches: {e}"))?;
+
+    if schema.column_with_name(row_id_column_name).is_some() {
+        return Err(format!(
+            "Column '{row_id_column_name}' already exists. Rename or choose a different row id column name."
+        ));
+    }
+
+    if schema.column_with_name(inv_norm_column_name).is_some() {
+        return Err(format!(
+            "Column '{inv_norm_column_name}' already exists. Rename or choose a different inverse norm column name."
+        ));
+    }
+
+    let arrays = combined.columns().to_vec();
+    let embedding_array = arrays[embedding_index].clone();
+    let embedding_list = embedding_array
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or_else(|| "Embedding column must be a FixedSizeListArray<Float32>".to_string())?;
+
+    if embedding_list.null_count() > 0 {
+        return Err(
+            "Embedding column contains null values; please clean the data before building."
+                .to_string(),
+        );
+    }
+
+    let mut inv_builder = Column::new_float32(inv_norm_column_name.to_string());
+    let mut row_builder = Column::new_int64(row_id_column_name.to_string());
+
+    for row_idx in 0..combined.num_rows() {
+        let value = embedding_list.value(row_idx);
+        let float_array = value
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .ok_or_else(|| "Embedding column must be Float32 values".to_string())?;
+
+        let mut norm_sq = 0.0f32;
+        for i in 0..float_array.len() {
+            let v = float_array.value(i);
+            norm_sq += v * v;
+        }
+        let norm = norm_sq.sqrt();
+        let inv_norm = if norm != 0.0 { 1.0 / norm } else { 0.0 };
+
+        inv_builder.append(Some(inv_norm));
+        row_builder.append(Some(row_idx as i64));
+    }
+
+    let inv_norms = inv_builder
+        .collect()
+        .map_err(|e| format!("Failed to build inverse norm column: {e}"))?;
+    let row_ids = row_builder
+        .collect()
+        .map_err(|e| format!("Failed to build row id column: {e}"))?;
+
+    // Reorder columns: row_id, vectors (with final name), inv_norms, metadata
+    let mut final_fields = Vec::with_capacity(schema.fields().len() + 2);
+    let mut final_arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len() + 2);
+
+    final_fields.push(Field::new(
+        row_id_column_name.to_string(),
+        DataType::Int64,
+        false,
+    ));
+    final_arrays.push(row_ids.array().clone());
+
+    final_fields.push(Field::new(
+        vector_column_name.to_string(),
+        DataType::FixedSizeList(inner_field.clone(), dim),
+        embedding_field.is_nullable(),
+    ));
+    final_arrays.push(embedding_array);
+
+    final_fields.push(Field::new(
+        inv_norm_column_name.to_string(),
+        DataType::Float32,
+        false,
+    ));
+    final_arrays.push(inv_norms.array().clone());
+
+    for (idx, field) in schema.fields().iter().enumerate() {
+        if idx == embedding_index {
+            continue;
+        }
+        if field.name() == row_id_column_name || field.name() == inv_norm_column_name {
+            return Err(format!(
+                "Column name '{}' conflicts with generated columns. Rename it before building.",
+                field.name()
+            ));
+        }
+        final_fields.push((**field).clone());
+        final_arrays.push(arrays[idx].clone());
+    }
+
+    let final_schema = Arc::new(Schema::new(final_fields));
+    let batch = RecordBatch::try_new(final_schema.clone(), final_arrays)
+        .map_err(|e| format!("Failed to create finalized RecordBatch: {e}"))?;
+
+    let vector_index = final_schema
+        .index_of(vector_column_name)
+        .map_err(|e| format!("Vector column '{vector_column_name}' missing after build: {e}"))?;
+    let inv_norm_index = final_schema.index_of(inv_norm_column_name).map_err(|e| {
+        format!("Inverse norm column '{inv_norm_column_name}' missing after build: {e}")
+    })?;
+    let row_id_index = final_schema
+        .index_of(row_id_column_name)
+        .map_err(|e| format!("Row id column '{row_id_column_name}' missing after build: {e}"))?;
+
+    Ok(ReadyState {
+        batch: OttersRecord::from(batch),
+        dim,
+        vector_index,
+        inv_norm_index,
+        row_id_index,
+        last_query_stats: Arc::new(Mutex::new(None)),
+    })
+}
+
+fn read_parquet_batches(path: &Path) -> Result<Vec<RecordBatch>, String> {
+    let file = File::open(path)
+        .map_err(|e| format!("Failed to open parquet file {}: {e}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| format!("Failed to read parquet metadata {}: {e}", path.display()))?
+        .build()
+        .map_err(|e| format!("Failed to build parquet reader {}: {e}", path.display()))?;
+
+    reader.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        format!(
+            "Failed to read parquet batches from {}: {e}",
+            path.display()
+        )
+    })
+}
+
+fn read_csv_batches(path: &Path) -> Result<Vec<RecordBatch>, String> {
+    let format = Format::default().with_header(true).with_delimiter(b',');
+
+    let schema = {
+        let file = File::open(path)
+            .map_err(|e| format!("Failed to open CSV file {}: {e}", path.display()))?;
+        let mut reader = BufReader::new(file);
+        let (schema, _) = format
+            .infer_schema(&mut reader, None)
+            .map_err(|e| format!("Failed to infer CSV schema from {}: {e}", path.display()))?;
+        Arc::new(schema)
+    };
+
+    let file =
+        File::open(path).map_err(|e| format!("Failed to open CSV file {}: {e}", path.display()))?;
+    let reader = ReaderBuilder::new(schema)
+        .with_format(format)
+        .build(BufReader::new(file))
+        .map_err(|e| format!("Failed to build CSV reader {}: {e}", path.display()))?;
+
+    reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read CSV batches from {}: {e}", path.display()))
+}
+
+fn expand_glob(pattern: &str) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for entry in glob(pattern).map_err(|e| format!("Invalid glob pattern '{pattern}': {e}"))? {
+        match entry {
+            Ok(path) => paths.push(path),
+            Err(e) => return Err(format!("Failed to read glob result: {e}")),
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn rename_batch(
+    batch: &RecordBatch,
+    renames: &HashMap<String, String>,
+) -> Result<RecordBatch, String> {
+    let schema = batch.schema();
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    let mut seen = HashSet::with_capacity(schema.fields().len());
+
+    for field in schema.fields() {
+        let new_name = renames
+            .get(field.name())
+            .cloned()
+            .unwrap_or_else(|| field.name().clone());
+        if !seen.insert(new_name.clone()) {
+            return Err(format!(
+                "Renaming would produce duplicate column '{new_name}'"
+            ));
+        }
+        let mut new_field = Field::new(new_name, field.data_type().clone(), field.is_nullable());
+        if !field.metadata().is_empty() {
+            new_field = new_field.with_metadata(field.metadata().clone());
+        }
+        fields.push(new_field);
+    }
+
+    let metadata = schema.metadata().clone();
+    let new_schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    RecordBatch::try_new(new_schema, batch.columns().to_vec())
+        .map_err(|e| format!("Failed to rebuild RecordBatch after rename: {e}"))
+}
+
+fn apply_ready_renames(
+    ready: &mut ReadyState,
+    renames: &HashMap<String, String>,
+) -> Result<(), String> {
+    let new_batch = rename_batch(ready.batch.as_ref(), renames)?;
+    ready.batch = OttersRecord::from(new_batch);
+    Ok(())
 }
