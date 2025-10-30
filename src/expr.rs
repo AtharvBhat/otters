@@ -35,6 +35,7 @@
 //! column types and obtain a `CompiledFilter` plan used internally by the
 //! engine for fast pruning.
 
+use crate::datetime::try_parse_datetime_millis;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -327,26 +328,6 @@ impl fmt::Display for ExprError {
 
 impl Error for ExprError {}
 
-// Local datetime parsing (mirrors logic in col.rs)
-// Accepts: RFC3339/ISO8601, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS
-fn parse_datetime_literal_millis(s: &str) -> Option<i64> {
-    // Use chrono just like col.rs
-    use chrono::{DateTime as ChronoDateTime, NaiveDate, NaiveDateTime, Utc};
-
-    if let Ok(dt) = ChronoDateTime::parse_from_rfc3339(s) {
-        return Some(dt.with_timezone(&Utc).timestamp_millis());
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        && let Some(dt) = date.and_hms_opt(0, 0, 0)
-    {
-        return Some(dt.and_utc().timestamp_millis());
-    }
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return Some(dt.and_utc().timestamp_millis());
-    }
-    None
-}
-
 impl Expr {
     /// Type-check and lower the expression against a `schema` into a `CompiledFilter`.
     ///
@@ -381,62 +362,9 @@ impl CompiledFilter {
     }
 }
 
-/// Normalize a metadata-only plan by:
-/// - Dropping clauses that are tautologies like `(col == v) OR (col != v)`
-fn normalize_metadata_plan(mut plan: MetadataPlan) -> MetadataPlan {
-    let mut out: MetadataPlan = Vec::with_capacity(plan.len());
-
-    for clause in plan.drain(..) {
-        let mut is_tautology = false;
-
-        // Check for simple tautology: same col/value with Eq and Neq in the same clause
-        for lf in &clause {
-            match lf {
-                ColumnFilter::Numeric { column, cmp, rhs } if *cmp == CmpOp::Eq => {
-                    let conflict = clause.iter().any(|x| matches!(
-                        x,
-                        ColumnFilter::Numeric { column: c2, cmp: CmpOp::Neq, rhs: v2 } if c2 == column && v2 == rhs
-                    ));
-                    if conflict {
-                        is_tautology = true;
-                        break;
-                    }
-                }
-                ColumnFilter::String { column, cmp, rhs } if *cmp == CmpOp::Eq => {
-                    let conflict = clause.iter().any(|x| matches!(
-                        x,
-                        ColumnFilter::String { column: c2, cmp: CmpOp::Neq, rhs: v2 } if c2 == column && v2 == rhs
-                    ));
-                    if conflict {
-                        is_tautology = true;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if is_tautology {
-            continue;
-        }
-
-        // Keep clause as-is (no deduping of filters; no clause-level dedup)
-        out.push(clause);
-    }
-    out
-}
-
 fn validate_plan(plan: &Plan) -> Result<(), ExprError> {
     for clause in plan {
-        let mut has_metadata = false;
-        let mut has_metric = false;
-        for item in clause {
-            match item {
-                FilterItem::Metadata(_) => has_metadata = true,
-                FilterItem::Metric(_) => has_metric = true,
-            }
-        }
-        if has_metadata && has_metric {
+        if clause_contains_both_kinds(clause) {
             return Err(ExprError::MixedMetricMetadataClause);
         }
     }
@@ -444,39 +372,67 @@ fn validate_plan(plan: &Plan) -> Result<(), ExprError> {
 }
 
 fn extract_metadata_plan(plan: &Plan) -> MetadataPlan {
-    plan.iter()
-        .filter_map(|clause| {
-            let mut collected: Vec<ColumnFilter> = Vec::new();
-            for item in clause {
-                if let FilterItem::Metadata(cf) = item {
-                    collected.push(cf.clone());
-                }
-            }
-            if collected.is_empty() {
-                None
-            } else {
-                Some(collected)
-            }
-        })
-        .collect()
+    collect_plan_items(plan, |item| match item {
+        FilterItem::Metadata(cf) => Some(cf.clone()),
+        FilterItem::Metric(_) => None,
+    })
 }
 
 fn extract_metric_plan(plan: &Plan) -> MetricPlan {
-    plan.iter()
-        .filter_map(|clause| {
-            let mut collected: Vec<MetricFilter> = Vec::new();
-            for item in clause {
-                if let FilterItem::Metric(mf) = item {
-                    collected.push(mf.clone());
-                }
-            }
-            if collected.is_empty() {
-                None
-            } else {
-                Some(collected)
-            }
-        })
+    collect_plan_items(plan, |item| match item {
+        FilterItem::Metric(mf) => Some(mf.clone()),
+        FilterItem::Metadata(_) => None,
+    })
+}
+
+fn normalize_metadata_plan(plan: MetadataPlan) -> MetadataPlan {
+    plan.into_iter()
+        .filter(|clause| !metadata_clause_is_tautology(clause))
         .collect()
+}
+
+fn clause_contains_both_kinds(clause: &[FilterItem]) -> bool {
+    let mut has_metadata = false;
+    let mut has_metric = false;
+    for item in clause {
+        match item {
+            FilterItem::Metadata(_) => has_metadata = true,
+            FilterItem::Metric(_) => has_metric = true,
+        }
+        if has_metadata && has_metric {
+            return true;
+        }
+    }
+    false
+}
+
+fn collect_plan_items<T, F>(plan: &Plan, mut map: F) -> Vec<Vec<T>>
+where
+    T: Clone,
+    F: FnMut(&FilterItem) -> Option<T>,
+{
+    let mut out: Vec<Vec<T>> = Vec::new();
+    for clause in plan {
+        let collected: Vec<T> = clause.iter().filter_map(&mut map).collect();
+        if !collected.is_empty() {
+            out.push(collected);
+        }
+    }
+    out
+}
+
+fn metadata_clause_is_tautology(clause: &[ColumnFilter]) -> bool {
+    clause.iter().any(|filter| match filter {
+        ColumnFilter::Numeric { column, cmp: CmpOp::Eq, rhs } => clause.iter().any(|other| matches!(
+            other,
+            ColumnFilter::Numeric { column: c2, cmp: CmpOp::Neq, rhs: v2 } if c2 == column && v2 == rhs
+        )),
+        ColumnFilter::String { column, cmp: CmpOp::Eq, rhs } => clause.iter().any(|other| matches!(
+            other,
+            ColumnFilter::String { column: c2, cmp: CmpOp::Neq, rhs: v2 } if c2 == column && v2 == rhs
+        )),
+        _ => false,
+    })
 }
 
 /// Lower an expression into a filter plan (AND of clauses with OR-inside).
@@ -624,7 +580,7 @@ fn compile_column_cmp(
         DataType::DateTime => {
             // Accept only datetime-parseable string literals; store as i64 millis
             let millis = match lit {
-                Literal::Str(s) => match parse_datetime_literal_millis(&s) {
+                Literal::Str(s) => match try_parse_datetime_millis(&s) {
                     Some(ms) => ms,
                     None => {
                         return Err(ExprError::TypeMismatch(

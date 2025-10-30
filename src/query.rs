@@ -226,6 +226,23 @@ impl<'a> OttersQuery<'a> {
 
     /// Execute the query plan and return the materialized results.
     pub fn collect(self) -> Result<QueryOutput, String> {
+        QueryExecution::from_query(self)?.execute()
+    }
+}
+
+struct QueryExecution<'a> {
+    store: &'a OttersStore,
+    query_vector: Vec<f32>,
+    query_inv_norm: f32,
+    metric_hint: Option<QueryMetric>,
+    filter_expr: Option<Expr>,
+    top_k: Option<usize>,
+    durations: Vec<(&'static str, f64)>,
+    metadata_stats: Vec<MetadataColumnStats>,
+}
+
+impl<'a> QueryExecution<'a> {
+    fn from_query(query: OttersQuery<'a>) -> Result<Self, String> {
         let OttersQuery {
             store,
             query_vector,
@@ -234,101 +251,150 @@ impl<'a> OttersQuery<'a> {
             filter_expr,
             top_k,
             error,
-        } = self;
+        } = query;
 
         if let Some(err) = error {
             return Err(err);
         }
 
-        let total_start = Instant::now();
-        let mut duration_stats: Vec<(&str, f64)> = Vec::new();
-        let mut metadata_stats: Vec<MetadataColumnStats> = Vec::new();
-
         let query = query_vector.ok_or_else(|| "Query vector not provided".to_string())?;
         let inv_norm = query_inv_norm.unwrap_or_else(|| inverse_norm(&query));
 
-        let compiled_filter = if let Some(expr) = filter_expr {
-            let start = Instant::now();
-            let compiled = compile_expr(store, expr)?;
-            duration_stats.push(("compile_filter", duration_ms(start)));
-            Some(compiled)
-        } else {
-            None
-        };
+        Ok(Self {
+            store,
+            query_vector: query,
+            query_inv_norm: inv_norm,
+            metric_hint: metric,
+            filter_expr,
+            top_k,
+            durations: Vec::new(),
+            metadata_stats: Vec::new(),
+        })
+    }
 
-        let metadata_plan = compiled_filter
+    fn execute(mut self) -> Result<QueryOutput, String> {
+        let total_start = Instant::now();
+
+        let compiled = self.compile_filter()?;
+        let metadata_plan = compiled
             .as_ref()
             .map(|f| f.metadata_clauses.clone())
             .unwrap_or_default();
-        let metric_plan = compiled_filter
-            .as_ref()
-            .map(metric_plan_from)
-            .unwrap_or_default();
+        let metric_plan = compiled.as_ref().map(metric_plan_from).unwrap_or_default();
+        let metric = self.resolve_metric(&metric_plan)?;
 
-        let inferred_metric = metric_from_plan(&metric_plan)?;
-        let metric = match (metric, inferred_metric) {
-            (Some(explicit), Some(inferred)) if explicit != inferred => {
-                return Err(format!(
-                    "Metric {explicit:?} specified in query conflicts with metric {inferred:?} in filter"
-                ));
-            }
-            (Some(explicit), _) => explicit,
-            (None, Some(inferred)) => inferred,
-            (None, None) => QueryMetric::Cosine,
-        };
-
-        let metadata_start = Instant::now();
-        let (selection, mut metadata_counts) = apply_metadata_filters(store, &metadata_plan)?;
-        duration_stats.push(("apply_metadata_filters", duration_ms(metadata_start)));
-        metadata_stats.append(&mut metadata_counts);
-
-        let scoring_start = Instant::now();
-        let scored = score_candidates(store, &query, inv_norm, metric, &selection, &metric_plan)?;
-        duration_stats.push(("score_candidates", duration_ms(scoring_start)));
+        let selection = self.apply_metadata(&metadata_plan)?;
         let candidate_count = selection.row_ids.len() as u64;
+        let scored = self.score(&selection, metric, &metric_plan)?;
+        let scored_count = scored.len() as u64;
+        let output = self.materialize(scored, metric)?;
 
-        let vector_stats;
-        let output = if scored.is_empty() {
-            let materialize_start = Instant::now();
-            let result = build_empty_output(store)?;
-            duration_stats.push(("materialize_output", duration_ms(materialize_start)));
-            vector_stats = (candidate_count, 0);
-            result
-        } else {
-            let prepare_start = Instant::now();
-            let (row_ids_array, scores_array) = build_score_arrays(&scored);
-            let sorted_indices =
-                sort_scores(&scores_array, metric, top_k).map_err(|e| e.to_string())?;
-            let sorted_row_ids =
-                take(row_ids_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
-            let sorted_scores =
-                take(scores_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
-
-            let row_ids = sorted_row_ids
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| "Failed to downcast sorted row ids".to_string())?
-                .clone();
-            let scores = sorted_scores
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| "Failed to downcast sorted scores".to_string())?
-                .clone();
-            duration_stats.push(("prepare_results", duration_ms(prepare_start)));
-
-            let materialize_start = Instant::now();
-            let result = materialize_output(store, row_ids, scores)?;
-            duration_stats.push(("materialize_output", duration_ms(materialize_start)));
-            vector_stats = (candidate_count, scored.len() as u64);
-            result
-        };
-
-        duration_stats.push(("total_query", duration_ms(total_start)));
-        let stats_batch =
-            build_query_stats_batch(&duration_stats, &metadata_stats, Some(vector_stats))?;
-        store.set_last_query_stats(stats_batch);
-
+        self.durations
+            .push(("total_query", duration_ms(total_start)));
+        self.record_stats((candidate_count, scored_count))?;
         Ok(output)
+    }
+
+    fn compile_filter(&mut self) -> Result<Option<CompiledFilter>, String> {
+        match self.filter_expr.take() {
+            Some(expr) => {
+                let start = Instant::now();
+                let compiled = compile_expr(self.store, expr)?;
+                self.durations.push(("compile_filter", duration_ms(start)));
+                Ok(Some(compiled))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn resolve_metric(&self, metric_plan: &MetricPlan) -> Result<QueryMetric, String> {
+        let inferred = metric_from_plan(metric_plan)?;
+        match (self.metric_hint, inferred) {
+            (Some(explicit), Some(inferred_metric)) if explicit != inferred_metric => Err(format!(
+                "Metric {explicit:?} specified in query conflicts with metric {inferred_metric:?} in filter"
+            )),
+            (Some(explicit), _) => Ok(explicit),
+            (None, Some(inferred_metric)) => Ok(inferred_metric),
+            (None, None) => Ok(QueryMetric::Cosine),
+        }
+    }
+
+    fn apply_metadata(&mut self, plan: &MetadataPlan) -> Result<MetadataSelection, String> {
+        let start = Instant::now();
+        let (selection, stats) = apply_metadata_filters(self.store, plan)?;
+        self.durations
+            .push(("apply_metadata_filters", duration_ms(start)));
+        self.metadata_stats = stats;
+        Ok(selection)
+    }
+
+    fn score(
+        &mut self,
+        selection: &MetadataSelection,
+        metric: QueryMetric,
+        metric_plan: &MetricPlan,
+    ) -> Result<Vec<ScoredRow>, String> {
+        let start = Instant::now();
+        let scored = score_candidates(
+            self.store,
+            &self.query_vector,
+            self.query_inv_norm,
+            metric,
+            selection,
+            metric_plan,
+        )?;
+        self.durations
+            .push(("score_candidates", duration_ms(start)));
+        Ok(scored)
+    }
+
+    fn materialize(
+        &mut self,
+        scored: Vec<ScoredRow>,
+        metric: QueryMetric,
+    ) -> Result<QueryOutput, String> {
+        if scored.is_empty() {
+            let materialize_start = Instant::now();
+            let output = build_empty_output(self.store)?;
+            self.durations
+                .push(("materialize_output", duration_ms(materialize_start)));
+            return Ok(output);
+        }
+
+        let prepare_start = Instant::now();
+        let (row_ids_array, scores_array) = build_score_arrays(&scored);
+        let sorted_indices =
+            sort_scores(&scores_array, metric, self.top_k).map_err(|e| e.to_string())?;
+        let sorted_row_ids =
+            take(row_ids_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
+        let sorted_scores =
+            take(scores_array.as_ref(), &sorted_indices, None).map_err(|e| e.to_string())?;
+        self.durations
+            .push(("prepare_results", duration_ms(prepare_start)));
+
+        let row_ids = sorted_row_ids
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| "Failed to downcast sorted row ids".to_string())?
+            .clone();
+        let scores = sorted_scores
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .ok_or_else(|| "Failed to downcast sorted scores".to_string())?
+            .clone();
+
+        let materialize_start = Instant::now();
+        let output = materialize_output(self.store, row_ids, scores)?;
+        self.durations
+            .push(("materialize_output", duration_ms(materialize_start)));
+        Ok(output)
+    }
+
+    fn record_stats(&self, vector_stats: (u64, u64)) -> Result<(), String> {
+        let stats_batch =
+            build_query_stats_batch(&self.durations, &self.metadata_stats, Some(vector_stats))?;
+        self.store.set_last_query_stats(stats_batch);
+        Ok(())
     }
 }
 
@@ -659,12 +725,16 @@ fn score_candidates(
     let dim = store.dim() as usize;
     let inv_norms = store.inv_norms_array();
 
-    let candidate_ids: Vec<i64> = selection.row_ids.values().to_vec();
+    let row_values = selection.row_ids.values();
+    let offset = selection.row_ids.offset();
+    let len = selection.row_ids.len();
+    let candidate_slice = &row_values.as_ref()[offset..offset + len];
 
-    let results: Vec<ScoredRow> = candidate_ids
+    let results: Vec<ScoredRow> = candidate_slice
         .par_iter()
-        .filter_map(|row_id| {
-            if *row_id < 0 {
+        .enumerate()
+        .filter_map(|(i, row_id)| {
+            if selection.row_ids.is_null(i) || *row_id < 0 {
                 return None;
             }
             let idx = *row_id as usize;
@@ -886,14 +956,14 @@ mod tests {
 
         let mut vector_builder = Column::new_vector("embedding", 3);
         for vec in &vectors {
-            vector_builder.append(Some(vec.as_slice()));
+            vector_builder = vector_builder.append(Some(vec.as_slice()));
         }
         let embeddings = vector_builder.collect().unwrap();
 
         let mut age_builder = Column::new_int32("age");
-        age_builder.append(Some(25));
-        age_builder.append(Some(35));
-        age_builder.append(Some(45));
+        age_builder = age_builder.append(Some(25));
+        age_builder = age_builder.append(Some(35));
+        age_builder = age_builder.append(Some(45));
         let ages = age_builder.collect().unwrap();
 
         OttersStore::new(["embedding", "age"], [embeddings, ages])

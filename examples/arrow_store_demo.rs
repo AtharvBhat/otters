@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create some sample vectors (embeddings)
     let dim = 4;
-    let vectors = vec![
+    let vectors = [
         vec![1.0, 0.0, 0.0, 0.0],
         vec![0.0, 1.0, 0.0, 0.0],
         vec![0.0, 0.0, 1.0, 0.0],
@@ -25,25 +25,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Build metadata columns in bulk
-    let mut names_builder = Column::new_string("name");
-    names_builder.append([
-        Some("Alice"),
-        Some("Bob"),
-        Some("Charlie"),
-        Some("Diana"),
-        Some("Eve"),
-    ]);
-    let names = names_builder.collect()?;
+    let names = Column::new_string("name")
+        .append([
+            Some("Alice"),
+            Some("Bob"),
+            Some("Charlie"),
+            Some("Diana"),
+            Some("Eve"),
+        ])
+        .collect()?;
 
-    let mut ages_builder = Column::new_int32("age");
-    ages_builder.append([Some(25), Some(30), Some(35), Some(28), Some(32)]);
-    let ages = ages_builder.collect()?;
+    let ages = Column::new_int32("age")
+        .append([Some(25), Some(30), Some(35), Some(28), Some(32)])
+        .collect()?;
 
-    let mut vector_builder = Column::new_vector("embedding", dim);
-    for vec in &vectors {
-        vector_builder.append(Some(vec.as_slice()));
-    }
-    let embeddings = vector_builder.collect()?;
+    let embedding_values: Vec<Option<&[f32]>> =
+        vectors.iter().map(|vec| Some(vec.as_slice())).collect();
+    let embeddings = Column::new_vector("embedding", dim)
+        .append(embedding_values)
+        .collect()?;
 
     // Build the Arrow store
     let store = OttersStore::new(["name", "age", "embedding"], [names, ages, embeddings])
@@ -71,6 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch = store.to_recordbatch().expect("store already built");
     let restored = OttersStore::from_recordbatch(batch)
         .with_embedding_column(store.vector_column_name())
+        .with_inv_norm_column_name("restored_inv_norms")
+        .with_row_id_column_name("restored_row_id")
         .build()?;
     println!("Restored store schema:\n{}", restored.schema());
     println!();

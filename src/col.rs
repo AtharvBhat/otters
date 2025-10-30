@@ -2,13 +2,14 @@
 //!
 //! Thin wrapper around Apache Arrow arrays for convenient column operations.
 
+use crate::datetime::{parse_datetime_millis, parse_datetime_millis_with_format};
 use arrow::array::{
     Array, ArrayRef, FixedSizeListArray, FixedSizeListBuilder, Float32Array, Float64Array,
     Int32Array, Int64Array, PrimitiveBuilder, StringArray, StringBuilder,
     TimestampMillisecondArray, TimestampMillisecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Int32Type, Int64Type, TimeUnit};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::DateTime;
 use std::fmt;
 
 // Re-export Arrow types for convenience
@@ -179,70 +180,7 @@ impl OttersColumn {
     }
 
     fn format_value(&self, index: usize) -> String {
-        if self.is_null(index) {
-            return "NULL".to_string();
-        }
-
-        match self.field.data_type() {
-            DataType::Int32 => self
-                .array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .map(|arr| arr.value(index).to_string())
-                .unwrap_or_else(|| "<invalid Int32 column>".to_string()),
-            DataType::Int64 => self
-                .array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .map(|arr| arr.value(index).to_string())
-                .unwrap_or_else(|| "<invalid Int64 column>".to_string()),
-            DataType::Float32 => self
-                .array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .map(|arr| format!("{:.4}", arr.value(index)))
-                .unwrap_or_else(|| "<invalid Float32 column>".to_string()),
-            DataType::Float64 => self
-                .array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .map(|arr| format!("{:.4}", arr.value(index)))
-                .unwrap_or_else(|| "<invalid Float64 column>".to_string()),
-            DataType::Utf8 => self
-                .array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .map(|arr| format!("\"{}\"", arr.value(index)))
-                .unwrap_or_else(|| "<invalid Utf8 column>".to_string()),
-            DataType::Timestamp(TimeUnit::Millisecond, _) => self
-                .array
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .map(|arr| {
-                    let millis = arr.value(index);
-                    match DateTime::from_timestamp_millis(millis) {
-                        Some(dt) => format!("{} ({millis})", dt.format("%Y-%m-%d %H:%M:%S UTC")),
-                        None => format!("Invalid timestamp ({millis})"),
-                    }
-                })
-                .unwrap_or_else(|| "<invalid Timestamp column>".to_string()),
-            DataType::FixedSizeList(_, dim) => {
-                if let Some(vec) = self.vector_at(index) {
-                    let preview: Vec<String> =
-                        vec.iter().take(5).map(|v| format!("{v:.4}")).collect();
-                    let preview_str = preview.join(", ");
-                    if vec.len() > 5 {
-                        let more = vec.len() - 5;
-                        format!("[{preview_str}, ... {more} more] (dim={dim})")
-                    } else {
-                        format!("[{preview_str}] (dim={dim})")
-                    }
-                } else {
-                    "<invalid FixedSizeList column>".to_string()
-                }
-            }
-            _ => "<unsupported type>".to_string(),
-        }
+        ColumnValueFormatter::new(self).format(index)
     }
 }
 
@@ -346,8 +284,9 @@ impl Column {
     /// Append one or more values using a unified interface.
     ///
     /// Accepts single values (`builder.append(Some(value))`) or collections
-    /// like slices/arrays of `Option<T>`.
-    pub fn append<V>(&mut self, values: V) -> &mut Self
+    /// like slices/arrays of `Option<T>`. Returns the builder by value so the
+    /// method can be chained directly into [`collect`](Self::collect).
+    pub fn append<V>(mut self, values: V) -> Self
     where
         V: ColumnValues,
     {
@@ -355,29 +294,32 @@ impl Column {
             return self;
         }
 
-        let target = ColumnAppendTarget {
-            builder: &mut self.builder,
-        };
-        if let Err(err) = values.append_into(target) {
-            self.error = Some(err);
+        {
+            let target = ColumnAppendTarget {
+                builder: &mut self.builder,
+            };
+            if let Err(err) = values.append_into(target) {
+                self.error = Some(err);
+            }
         }
+
         self
     }
 
     /// Append datetime from string (auto-parses common formats)
-    pub fn append_datetime_str(&mut self, value: Option<&str>) -> &mut Self {
+    pub fn append_datetime_str(mut self, value: Option<&str>) -> Self {
         let millis = match value {
             None => None,
             Some(s) => {
                 let parsed = if let Some(fmt) = &self.datetime_format {
-                    parse_datetime_fmt(s, fmt)
+                    parse_datetime_millis_with_format(s, fmt)
                 } else {
-                    parse_datetime(s)
+                    parse_datetime_millis(s)
                 };
                 match parsed {
                     Ok(ts) => Some(ts),
                     Err(err) => {
-                        self.error = Some(err);
+                        self.error = Some(ColumnError::ParseError(err.to_string()));
                         return self;
                     }
                 }
@@ -453,34 +395,87 @@ impl fmt::Display for OttersColumn {
     }
 }
 
+struct ColumnValueFormatter<'a> {
+    column: &'a OttersColumn,
+}
+
+impl<'a> ColumnValueFormatter<'a> {
+    fn new(column: &'a OttersColumn) -> Self {
+        Self { column }
+    }
+
+    fn format(&self, index: usize) -> String {
+        let column = self.column;
+        if column.is_null(index) {
+            return "NULL".to_string();
+        }
+
+        match column.dtype() {
+            DataType::Int32 => column
+                .array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(|arr| arr.value(index).to_string())
+                .unwrap_or_else(|| "<invalid Int32 column>".to_string()),
+            DataType::Int64 => column
+                .array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .map(|arr| arr.value(index).to_string())
+                .unwrap_or_else(|| "<invalid Int64 column>".to_string()),
+            DataType::Float32 => column
+                .array
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .map(|arr| format!("{:.4}", arr.value(index)))
+                .unwrap_or_else(|| "<invalid Float32 column>".to_string()),
+            DataType::Float64 => column
+                .array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(|arr| format!("{:.4}", arr.value(index)))
+                .unwrap_or_else(|| "<invalid Float64 column>".to_string()),
+            DataType::Utf8 => column
+                .array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|arr| format!("\"{}\"", arr.value(index)))
+                .unwrap_or_else(|| "<invalid Utf8 column>".to_string()),
+            DataType::Timestamp(TimeUnit::Millisecond, _) => column
+                .array
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .map(|arr| {
+                    let millis = arr.value(index);
+                    match DateTime::from_timestamp_millis(millis) {
+                        Some(dt) => format!("{} ({millis})", dt.format("%Y-%m-%d %H:%M:%S UTC")),
+                        None => format!("Invalid timestamp ({millis})"),
+                    }
+                })
+                .unwrap_or_else(|| "<invalid Timestamp column>".to_string()),
+            DataType::FixedSizeList(_, dim) => {
+                if let Some(vec) = column.vector_at(index) {
+                    let preview: Vec<String> =
+                        vec.iter().take(5).map(|v| format!("{v:.4}")).collect();
+                    let preview_str = preview.join(", ");
+                    if vec.len() > 5 {
+                        let more = vec.len() - 5;
+                        format!("[{preview_str}, ... {more} more] (dim={dim})")
+                    } else {
+                        format!("[{preview_str}] (dim={dim})")
+                    }
+                } else {
+                    "<invalid FixedSizeList column>".to_string()
+                }
+            }
+            _ => "<unsupported type>".to_string(),
+        }
+    }
+}
+
 /// Public wrapper passed to `ColumnValues` implementations.
 pub struct ColumnAppendTarget<'a> {
     builder: &'a mut BuilderEnum,
-}
-
-/// Internal helper implemented for types supported by [`Column::append`].
-trait ColumnType: Copy {
-    fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError>;
-
-    fn append_iter<I>(builder: &mut BuilderEnum, iter: I) -> Result<(), ColumnError>
-    where
-        I: IntoIterator<Item = Option<Self>>,
-    {
-        for value in iter {
-            Self::append_option(builder, value)?;
-        }
-        Ok(())
-    }
-
-    fn append_slice(builder: &mut BuilderEnum, values: &[Option<Self>]) -> Result<(), ColumnError>
-    where
-        Option<Self>: Copy,
-    {
-        for &value in values {
-            Self::append_option(builder, value)?;
-        }
-        Ok(())
-    }
 }
 
 /// Helper trait powering [`Column::append`].
@@ -488,48 +483,21 @@ pub trait ColumnValues {
     fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError>;
 }
 
-macro_rules! impl_column_type_numeric {
-    ($ty:ty, $variant:ident, $err:literal) => {
-        impl ColumnType for $ty {
-            fn append_option(
-                builder: &mut BuilderEnum,
-                value: Option<Self>,
-            ) -> Result<(), ColumnError> {
-                match builder {
-                    BuilderEnum::$variant(b) => {
-                        b.append_option(value);
-                        Ok(())
-                    }
-                    _ => Err(ColumnError::TypeMismatch($err.to_string())),
-                }
+impl<'a> ColumnAppendTarget<'a> {
+    fn append_int32(&mut self, value: Option<i32>) -> Result<(), ColumnError> {
+        match self.builder {
+            BuilderEnum::Int32(b) => {
+                b.append_option(value);
+                Ok(())
             }
-
-            fn append_slice(
-                builder: &mut BuilderEnum,
-                values: &[Option<Self>],
-            ) -> Result<(), ColumnError>
-            where
-                Option<Self>: Copy,
-            {
-                match builder {
-                    BuilderEnum::$variant(b) => {
-                        b.extend(values.iter().copied());
-                        Ok(())
-                    }
-                    _ => Err(ColumnError::TypeMismatch($err.to_string())),
-                }
-            }
+            _ => Err(ColumnError::TypeMismatch(
+                "Expected Int32 builder".to_string(),
+            )),
         }
-    };
-}
+    }
 
-impl_column_type_numeric!(i32, Int32, "Expected Int32 builder");
-impl_column_type_numeric!(f32, Float32, "Expected Float32 builder");
-impl_column_type_numeric!(f64, Float64, "Expected Float64 builder");
-
-impl ColumnType for i64 {
-    fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError> {
-        match builder {
+    fn append_int64(&mut self, value: Option<i64>) -> Result<(), ColumnError> {
+        match self.builder {
             BuilderEnum::Int64(b) => {
                 b.append_option(value);
                 Ok(())
@@ -544,29 +512,32 @@ impl ColumnType for i64 {
         }
     }
 
-    fn append_slice(builder: &mut BuilderEnum, values: &[Option<Self>]) -> Result<(), ColumnError>
-    where
-        Option<Self>: Copy,
-    {
-        match builder {
-            BuilderEnum::Int64(b) => {
-                b.extend(values.iter().copied());
-                Ok(())
-            }
-            BuilderEnum::Timestamp(b) => {
-                b.extend(values.iter().copied());
+    fn append_float32(&mut self, value: Option<f32>) -> Result<(), ColumnError> {
+        match self.builder {
+            BuilderEnum::Float32(b) => {
+                b.append_option(value);
                 Ok(())
             }
             _ => Err(ColumnError::TypeMismatch(
-                "Expected Int64 or Timestamp builder".to_string(),
+                "Expected Float32 builder".to_string(),
             )),
         }
     }
-}
 
-impl ColumnType for &str {
-    fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError> {
-        match builder {
+    fn append_float64(&mut self, value: Option<f64>) -> Result<(), ColumnError> {
+        match self.builder {
+            BuilderEnum::Float64(b) => {
+                b.append_option(value);
+                Ok(())
+            }
+            _ => Err(ColumnError::TypeMismatch(
+                "Expected Float64 builder".to_string(),
+            )),
+        }
+    }
+
+    fn append_str(&mut self, value: Option<&str>) -> Result<(), ColumnError> {
+        match self.builder {
             BuilderEnum::String(b) => {
                 b.append_option(value);
                 Ok(())
@@ -577,25 +548,8 @@ impl ColumnType for &str {
         }
     }
 
-    fn append_slice(builder: &mut BuilderEnum, values: &[Option<Self>]) -> Result<(), ColumnError>
-    where
-        Option<Self>: Copy,
-    {
-        match builder {
-            BuilderEnum::String(b) => {
-                b.extend(values.iter().copied());
-                Ok(())
-            }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected String builder".to_string(),
-            )),
-        }
-    }
-}
-
-impl ColumnType for &[f32] {
-    fn append_option(builder: &mut BuilderEnum, value: Option<Self>) -> Result<(), ColumnError> {
-        match builder {
+    fn append_vector(&mut self, value: Option<&[f32]>) -> Result<(), ColumnError> {
+        match self.builder {
             BuilderEnum::Vector(b) => {
                 match value {
                     Some(vec) => {
@@ -612,83 +566,145 @@ impl ColumnType for &[f32] {
             )),
         }
     }
-}
 
-impl<T> ColumnValues for &[Option<T>]
-where
-    T: ColumnType,
-    Option<T>: Copy,
-{
-    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
-        T::append_slice(target.builder, self)
-    }
-}
-
-impl<T> ColumnValues for Vec<Option<T>>
-where
-    T: ColumnType,
-{
-    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
-        T::append_iter(target.builder, self)
-    }
-}
-
-impl<T> ColumnValues for Option<T>
-where
-    T: ColumnType,
-{
-    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
-        T::append_option(target.builder, self)
-    }
-}
-
-impl<T, const N: usize> ColumnValues for [Option<T>; N]
-where
-    T: ColumnType,
-{
-    fn append_into(self, target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
-        T::append_iter(target.builder, IntoIterator::into_iter(self))
-    }
-}
-
-// DateTime parsing helpers
-fn parse_datetime(s: &str) -> Result<i64, ColumnError> {
-    // Try ISO 8601 / RFC 3339
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Ok(dt.with_timezone(&Utc).timestamp_millis());
-    }
-
-    // Try YYYY-MM-DD
-    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        if let Some(dt) = date.and_hms_opt(0, 0, 0) {
-            return Ok(dt.and_utc().timestamp_millis());
+    fn append_many_int32<I>(&mut self, iter: I) -> Result<(), ColumnError>
+    where
+        I: IntoIterator<Item = Option<i32>>,
+    {
+        for value in iter {
+            self.append_int32(value)?;
         }
+        Ok(())
     }
 
-    // Try YYYY-MM-DD HH:MM:SS
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return Ok(dt.and_utc().timestamp_millis());
+    fn append_many_int64<I>(&mut self, iter: I) -> Result<(), ColumnError>
+    where
+        I: IntoIterator<Item = Option<i64>>,
+    {
+        for value in iter {
+            self.append_int64(value)?;
+        }
+        Ok(())
     }
 
-    Err(ColumnError::ParseError(format!(
-        "Cannot parse '{s}' as datetime. Supported formats: ISO 8601, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS"
-    )))
+    fn append_many_float32<I>(&mut self, iter: I) -> Result<(), ColumnError>
+    where
+        I: IntoIterator<Item = Option<f32>>,
+    {
+        for value in iter {
+            self.append_float32(value)?;
+        }
+        Ok(())
+    }
+
+    fn append_many_float64<I>(&mut self, iter: I) -> Result<(), ColumnError>
+    where
+        I: IntoIterator<Item = Option<f64>>,
+    {
+        for value in iter {
+            self.append_float64(value)?;
+        }
+        Ok(())
+    }
+
+    fn append_many_str<'b, I>(&mut self, iter: I) -> Result<(), ColumnError>
+    where
+        I: IntoIterator<Item = Option<&'b str>>,
+    {
+        for value in iter {
+            self.append_str(value)?;
+        }
+        Ok(())
+    }
+
+    fn append_many_vector<'b, I>(&mut self, iter: I) -> Result<(), ColumnError>
+    where
+        I: IntoIterator<Item = Option<&'b [f32]>>,
+    {
+        for value in iter {
+            self.append_vector(value)?;
+        }
+        Ok(())
+    }
 }
 
-fn parse_datetime_fmt(s: &str, format: &str) -> Result<i64, ColumnError> {
-    // Try as datetime first
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, format) {
-        return Ok(dt.and_utc().timestamp_millis());
-    }
-
-    // Try as date only
-    if let Ok(date) = NaiveDate::parse_from_str(s, format) {
-        if let Some(dt) = date.and_hms_opt(0, 0, 0) {
-            return Ok(dt.and_utc().timestamp_millis());
+macro_rules! impl_column_values_numeric {
+    ($ty:ty, $append_fn:ident, $append_many_fn:ident) => {
+        impl ColumnValues for Option<$ty> {
+            fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+                target.$append_fn(self)
+            }
         }
-    }
 
-    Err(ColumnError::ParseError(format!(
-        "Cannot parse '{s}' with format '{format}'"
-    )))
+        impl ColumnValues for Vec<Option<$ty>> {
+            fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+                target.$append_many_fn(self)
+            }
+        }
+
+        impl ColumnValues for &[Option<$ty>] {
+            fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+                target.$append_many_fn(self.iter().copied())
+            }
+        }
+
+        impl<const N: usize> ColumnValues for [Option<$ty>; N] {
+            fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+                target.$append_many_fn(self.into_iter())
+            }
+        }
+    };
+}
+
+impl_column_values_numeric!(i32, append_int32, append_many_int32);
+impl_column_values_numeric!(i64, append_int64, append_many_int64);
+impl_column_values_numeric!(f32, append_float32, append_many_float32);
+impl_column_values_numeric!(f64, append_float64, append_many_float64);
+
+impl ColumnValues for Option<&str> {
+    fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        target.append_str(self)
+    }
+}
+
+impl ColumnValues for Vec<Option<&str>> {
+    fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        target.append_many_str(self)
+    }
+}
+
+impl ColumnValues for &[Option<&str>] {
+    fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        target.append_many_str(self.iter().copied())
+    }
+}
+
+impl<const N: usize> ColumnValues for [Option<&str>; N] {
+    fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        target.append_many_str(self)
+    }
+}
+
+impl ColumnValues for Option<&[f32]> {
+    fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        target.append_vector(self)
+    }
+}
+
+impl ColumnValues for Vec<Option<&[f32]>> {
+    fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        target.append_many_vector(self)
+    }
+}
+
+impl ColumnValues for &[Option<&[f32]>] {
+    fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        target.append_many_vector(self.iter().copied())
+    }
+}
+
+impl<const N: usize> ColumnValues for [Option<&[f32]>; N] {
+    fn append_into(self, mut target: ColumnAppendTarget<'_>) -> Result<(), ColumnError> {
+        target.append_many_vector(self)
+    }
 }

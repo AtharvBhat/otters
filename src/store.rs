@@ -68,7 +68,7 @@ pub struct OttersStore {
     vector_column_name: String,
     inv_norm_column_name: String,
     row_id_column_name: String,
-    error: Option<String>,
+    health: StoreHealth,
 }
 
 impl Clone for OttersStore {
@@ -78,7 +78,7 @@ impl Clone for OttersStore {
             vector_column_name: self.vector_column_name.clone(),
             inv_norm_column_name: self.inv_norm_column_name.clone(),
             row_id_column_name: self.row_id_column_name.clone(),
-            error: self.error.clone(),
+            health: self.health.clone(),
         }
     }
 }
@@ -90,7 +90,7 @@ impl fmt::Debug for OttersStore {
             .field("vector_column_name", &self.vector_column_name)
             .field("inv_norm_column_name", &self.inv_norm_column_name)
             .field("row_id_column_name", &self.row_id_column_name)
-            .field("error", &self.error)
+            .field("health", &self.health)
             .finish()
     }
 }
@@ -99,6 +99,39 @@ impl fmt::Debug for OttersStore {
 enum StoreState {
     Draft(DraftState),
     Ready(ReadyState),
+}
+
+#[derive(Clone, Debug, Default)]
+enum StoreHealth {
+    #[default]
+    Ready,
+    Failed(String),
+}
+
+impl StoreHealth {
+    fn fail(&mut self, msg: impl Into<String>) {
+        if matches!(self, StoreHealth::Ready) {
+            *self = StoreHealth::Failed(msg.into());
+        }
+    }
+
+    fn is_failed(&self) -> bool {
+        matches!(self, StoreHealth::Failed(_))
+    }
+
+    fn ensure_ok(&self) -> Result<(), String> {
+        match self {
+            StoreHealth::Ready => Ok(()),
+            StoreHealth::Failed(msg) => Err(msg.clone()),
+        }
+    }
+
+    fn error_message(&self) -> Option<&String> {
+        match self {
+            StoreHealth::Ready => None,
+            StoreHealth::Failed(msg) => Some(msg),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -212,51 +245,47 @@ impl OttersStore {
             vector_column_name: DEFAULT_VECTOR_COL.to_string(),
             inv_norm_column_name: DEFAULT_INV_NORM_COL.to_string(),
             row_id_column_name: DEFAULT_ROW_ID_COL.to_string(),
-            error: None,
+            health: StoreHealth::default(),
         }
     }
 
-    fn record_error(&mut self, err: impl Into<String>) {
-        if self.error.is_none() {
-            self.error = Some(err.into());
-        }
+    fn fail(&mut self, err: impl Into<String>) {
+        self.health.fail(err);
     }
 
-    fn assign_draft_batches(&mut self, batches: Vec<RecordBatch>) {
-        match DraftState::new(batches) {
-            Ok(draft) => self.state = StoreState::Draft(draft),
-            Err(err) => self.record_error(err),
-        }
+    fn is_failed(&self) -> bool {
+        self.health.is_failed()
+    }
+
+    fn ensure_ok(&self) -> Result<(), String> {
+        self.health.ensure_ok()
+    }
+
+    fn error_message(&self) -> Option<&String> {
+        self.health.error_message()
+    }
+
+    fn assign_draft_batches(&mut self, batches: Vec<RecordBatch>) -> Result<(), String> {
+        let draft = DraftState::new(batches)?;
+        self.state = StoreState::Draft(draft);
+        Ok(())
     }
 
     /// Load one or more Parquet files into an `OttersStore` in draft form.
     pub fn from_parquet(pattern: impl AsRef<str>) -> Self {
         let mut store = Self::empty();
 
-        match expand_glob(pattern.as_ref()) {
-            Ok(paths) => {
-                if paths.is_empty() {
-                    store.record_error(format!(
-                        "No parquet files matched pattern '{}'",
-                        pattern.as_ref()
-                    ));
-                    return store;
+        match load_batches_with(
+            pattern.as_ref(),
+            |p| format!("No parquet files matched pattern '{p}'"),
+            read_parquet_batches,
+        ) {
+            Ok(batches) => {
+                if let Err(err) = store.assign_draft_batches(batches) {
+                    store.fail(err);
                 }
-
-                let mut batches = Vec::new();
-                for path in paths {
-                    match read_parquet_batches(&path) {
-                        Ok(mut file_batches) => batches.append(&mut file_batches),
-                        Err(err) => {
-                            store.record_error(err);
-                            return store;
-                        }
-                    }
-                }
-
-                store.assign_draft_batches(batches);
             }
-            Err(err) => store.record_error(err),
+            Err(err) => store.fail(err),
         }
 
         store
@@ -268,30 +297,17 @@ impl OttersStore {
     pub fn from_csv(pattern: impl AsRef<str>) -> Self {
         let mut store = Self::empty();
 
-        match expand_glob(pattern.as_ref()) {
-            Ok(paths) => {
-                if paths.is_empty() {
-                    store.record_error(format!(
-                        "No CSV files matched pattern '{}'",
-                        pattern.as_ref()
-                    ));
-                    return store;
+        match load_batches_with(
+            pattern.as_ref(),
+            |p| format!("No CSV files matched pattern '{p}'"),
+            read_csv_batches,
+        ) {
+            Ok(batches) => {
+                if let Err(err) = store.assign_draft_batches(batches) {
+                    store.fail(err);
                 }
-
-                let mut batches = Vec::new();
-                for path in paths {
-                    match read_csv_batches(&path) {
-                        Ok(mut file_batches) => batches.append(&mut file_batches),
-                        Err(err) => {
-                            store.record_error(err);
-                            return store;
-                        }
-                    }
-                }
-
-                store.assign_draft_batches(batches);
             }
-            Err(err) => store.record_error(err),
+            Err(err) => store.fail(err),
         }
 
         store
@@ -305,7 +321,9 @@ impl OttersStore {
     /// Create a draft store from multiple [`RecordBatch`] instances.
     pub fn from_recordbatches(batches: Vec<RecordBatch>) -> Self {
         let mut store = Self::empty();
-        store.assign_draft_batches(batches);
+        if let Err(err) = store.assign_draft_batches(batches) {
+            store.fail(err);
+        }
         store
     }
 
@@ -337,7 +355,7 @@ impl OttersStore {
         let mut store = Self::empty();
 
         if names.len() != columns.len() {
-            store.record_error(format!(
+            store.fail(format!(
                 "Schema column count {} does not match data column count {}",
                 names.len(),
                 columns.len()
@@ -346,22 +364,22 @@ impl OttersStore {
         }
 
         if names.is_empty() {
-            store.record_error("Cannot build store with empty schema".to_string());
+            store.fail("Cannot build store with empty schema".to_string());
             return store;
         }
 
         let len = columns.first().map(|col| col.len()).unwrap_or(0);
         for (idx, column) in columns.iter().enumerate() {
             if column.len() != len {
-                store.record_error(format!(
+                store.fail(format!(
                     "Column '{}' length {} does not match expected length {}",
                     names[idx],
                     column.len(),
                     len
-                ))
+                ));
             }
         }
-        if store.error.is_some() {
+        if store.is_failed() {
             return store;
         }
 
@@ -385,8 +403,12 @@ impl OttersStore {
         let schema = Arc::new(Schema::new(fields));
 
         match RecordBatch::try_new(schema.clone(), arrays) {
-            Ok(batch) => store.assign_draft_batches(vec![batch]),
-            Err(err) => store.record_error(format!("Failed to create RecordBatch: {err}")),
+            Ok(batch) => {
+                if let Err(err) = store.assign_draft_batches(vec![batch]) {
+                    store.fail(err);
+                }
+            }
+            Err(err) => store.fail(format!("Failed to create RecordBatch: {err}")),
         }
 
         store
@@ -398,9 +420,9 @@ impl OttersStore {
     /// - `store.with_embedding_column("embedding");`
     /// - `store.with_embedding_column(("embedding", "vec"));`
     pub fn with_embedding_column(mut self, selection: impl Into<EmbeddingSelection>) -> Self {
-        if self.error.is_none() {
+        if !self.is_failed() {
             if let Err(err) = self.set_embedding_column(selection.into()) {
-                self.record_error(err);
+                self.fail(err);
             }
         }
         self
@@ -408,9 +430,9 @@ impl OttersStore {
 
     /// Configure the generated inverse norm column name in the finalized store.
     pub fn with_inv_norm_column_name(mut self, name: impl Into<String>) -> Self {
-        if self.error.is_none() {
+        if !self.is_failed() {
             if let Err(err) = self.set_inv_norm_column_name(name.into()) {
-                self.record_error(err);
+                self.fail(err);
             }
         }
         self
@@ -418,9 +440,9 @@ impl OttersStore {
 
     /// Configure the generated row id column name in the finalized store.
     pub fn with_row_id_column_name(mut self, name: impl Into<String>) -> Self {
-        if self.error.is_none() {
+        if !self.is_failed() {
             if let Err(err) = self.set_row_id_column_name(name.into()) {
-                self.record_error(err);
+                self.fail(err);
             }
         }
         self
@@ -434,9 +456,7 @@ impl OttersStore {
 
     /// Finalize the draft store in-place.
     pub fn build_mut(&mut self) -> Result<(), String> {
-        if let Some(err) = self.error.clone() {
-            return Err(err);
-        }
+        self.ensure_ok()?;
 
         if matches!(self.state, StoreState::Ready(_)) {
             return Err("Store already built".to_string());
@@ -465,9 +485,7 @@ impl OttersStore {
         K: Into<String>,
         V: Into<String>,
     {
-        if let Some(err) = &self.error {
-            return Err(err.clone());
-        }
+        self.ensure_ok()?;
 
         let map: HashMap<String, String> = renames
             .into_iter()
@@ -538,7 +556,7 @@ impl OttersStore {
 
     /// Returns `true` if the store has been built and is ready for querying.
     pub fn is_ready(&self) -> bool {
-        self.error.is_none() && matches!(self.state, StoreState::Ready(_))
+        !self.is_failed() && matches!(self.state, StoreState::Ready(_))
     }
 
     /// Returns `true` if the store has no rows.
@@ -550,7 +568,7 @@ impl OttersStore {
     }
 
     pub(crate) fn pending_error(&self) -> Option<&String> {
-        self.error.as_ref()
+        self.error_message()
     }
 
     /// Number of rows currently loaded.
@@ -826,9 +844,7 @@ impl OttersStore {
     }
 
     fn ensure_ready(&self) -> Result<&ReadyState, String> {
-        if let Some(err) = &self.error {
-            return Err(err.clone());
-        }
+        self.ensure_ok()?;
         match &self.state {
             StoreState::Ready(ready) => Ok(ready),
             StoreState::Draft(_) => {
@@ -860,7 +876,7 @@ impl fmt::Display for OttersStore {
                     draft.len(),
                     draft.schema().fields().len()
                 )?;
-                if let Some(err) = &self.error {
+                if let Some(err) = self.error_message() {
                     writeln!(f, "Pending error: {err}")?;
                 }
                 writeln!(
@@ -954,8 +970,8 @@ fn finalize_store(
         let norm = norm_sq.sqrt();
         let inv_norm = if norm != 0.0 { 1.0 / norm } else { 0.0 };
 
-        inv_builder.append(Some(inv_norm));
-        row_builder.append(Some(row_idx as i64));
+        inv_builder = inv_builder.append(Some(inv_norm));
+        row_builder = row_builder.append(Some(row_idx as i64));
     }
 
     let inv_norms = inv_builder
@@ -1026,6 +1042,27 @@ fn finalize_store(
         row_id_index,
         last_query_stats: Arc::new(Mutex::new(None)),
     })
+}
+
+fn load_batches_with<F>(
+    pattern: &str,
+    empty_msg: impl Fn(&str) -> String,
+    mut reader: F,
+) -> Result<Vec<RecordBatch>, String>
+where
+    F: FnMut(&Path) -> Result<Vec<RecordBatch>, String>,
+{
+    let paths = expand_glob(pattern)?;
+    if paths.is_empty() {
+        return Err(empty_msg(pattern));
+    }
+
+    let mut batches = Vec::new();
+    for path in paths {
+        let mut file_batches = reader(path.as_path())?;
+        batches.append(&mut file_batches);
+    }
+    Ok(batches)
 }
 
 fn read_parquet_batches(path: &Path) -> Result<Vec<RecordBatch>, String> {
