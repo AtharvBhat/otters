@@ -113,6 +113,10 @@ pub enum Expr {
     Column(String),
     Literal(Literal),
     Metric(MetricExpr),
+    MetricColumn {
+        column: String,
+        metric: MetricExpr,
+    },
     Cmp {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -149,6 +153,37 @@ pub fn euclidean() -> Expr {
 }
 
 impl Expr {
+    /// Attach a cosine metric to a column expression.
+    pub fn cosine(self) -> Expr {
+        self.metric_for(MetricExpr::Cosine)
+    }
+
+    /// Attach a dot product metric to a column expression.
+    pub fn dot_product(self) -> Expr {
+        self.metric_for(MetricExpr::DotProduct)
+    }
+
+    /// Attach a squared euclidean metric to a column expression.
+    pub fn squared_euclidean(self) -> Expr {
+        self.metric_for(MetricExpr::Euclidean)
+    }
+
+    fn metric_for(self, metric: MetricExpr) -> Expr {
+        match self {
+            Expr::Column(name) => Expr::MetricColumn {
+                column: name,
+                metric,
+            },
+            Expr::Metric(_) | Expr::MetricColumn { .. } => Expr::Metric(metric),
+            other => {
+                // Preserve ability to call directly on metric expressions
+                // by falling back to the legacy variant.
+                let _ = other;
+                Expr::Metric(metric)
+            }
+        }
+    }
+
     // Comparison builders
     /// Column == value
     pub fn eq<T: Into<Literal>>(self, v: T) -> Expr {
@@ -246,6 +281,7 @@ pub enum ColumnFilter {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetricFilter {
+    pub column: Option<String>,
     pub metric: MetricExpr,
     pub cmp: CmpOp,
     pub threshold: f32,
@@ -460,7 +496,9 @@ fn lower_to_plan(expr: &Expr, schema: &HashMap<String, DataType>) -> Result<Plan
         Expr::Cmp { left, right, op } => {
             compile_cmp_leaf(left, right, *op, schema).map(|f| vec![vec![f]])
         }
-        Expr::Column(_) | Expr::Literal(_) | Expr::Metric(_) => Err(ExprError::InvalidExpression),
+        Expr::Column(_) | Expr::Literal(_) | Expr::Metric(_) | Expr::MetricColumn { .. } => {
+            Err(ExprError::InvalidExpression)
+        }
     }
 }
 
@@ -482,14 +520,19 @@ fn compile_cmp_leaf(
         (Expr::Metric(metric), Expr::Literal(lit)) => {
             compile_metric_cmp(*metric, lit.clone(), op).map(FilterItem::Metric)
         }
+        (Expr::MetricColumn { column, metric }, Expr::Literal(lit)) => {
+            compile_metric_cmp_with_column(*metric, Some(column.clone()), lit.clone(), op)
+                .map(FilterItem::Metric)
+        }
         (Expr::Column(_), _) => Err(ExprError::InvalidComparison),
-        (Expr::Metric(_), _) => Err(ExprError::InvalidMetricComparison),
+        (Expr::Metric(_) | Expr::MetricColumn { .. }, _) => Err(ExprError::InvalidMetricComparison),
         _ => Err(ExprError::InvalidComparison),
     }
 }
 
-fn compile_metric_cmp(
+fn compile_metric_cmp_with_column(
     metric: MetricExpr,
+    column: Option<String>,
     lit: Literal,
     op: CmpOp,
 ) -> Result<MetricFilter, ExprError> {
@@ -504,10 +547,19 @@ fn compile_metric_cmp(
     }
 
     Ok(MetricFilter {
+        column,
         metric,
         cmp: op,
         threshold,
     })
+}
+
+fn compile_metric_cmp(
+    metric: MetricExpr,
+    lit: Literal,
+    op: CmpOp,
+) -> Result<MetricFilter, ExprError> {
+    compile_metric_cmp_with_column(metric, None, lit, op)
 }
 
 /// Compile a metadata column comparison.

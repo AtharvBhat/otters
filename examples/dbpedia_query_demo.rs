@@ -89,8 +89,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let vectors = test_store.vectors();
-    let test_ids = test_store.column("_id");
+    let vectors = test_store
+        .column(test_store.embedding_column_name())
+        .expect("vector column missing in test store");
+    let test_ids = test_store.column("_id").ok();
 
     let mut total_queries = 0usize;
     let mut accumulated_latency = 0f64;
@@ -113,7 +115,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let query_start = Instant::now();
         let result = train_store
-            .query(vector)
+            .query()
+            .with_query_vec(vector)
+            .order_by_desc()
             .take(top_k)
             .collect()
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
@@ -224,10 +228,11 @@ fn load_store(paths: &[PathBuf]) -> Result<OttersStore, Box<dyn std::error::Erro
         }
     }
 
-    OttersStore::from_recordbatches(batches)
+    let store = OttersStore::from_recordbatches(batches)
         .with_embedding_column(EMBEDDING_COLUMN)
         .build()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err).into())
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    Ok(store)
 }
 
 fn string_value(column: &OttersColumn, index: usize) -> Option<String> {

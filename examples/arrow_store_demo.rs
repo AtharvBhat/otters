@@ -2,7 +2,6 @@
 //!
 //! Run with: cargo run --example arrow_store_demo
 
-use otters::expr::cosine;
 use otters::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,23 +69,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Reconstructing store from existing RecordBatch...");
     let batch = store.to_recordbatch().expect("store already built");
     let restored = OttersStore::from_recordbatch(batch)
-        .with_embedding_column(store.vector_column_name())
-        .with_inv_norm_column_name("restored_inv_norms")
-        .with_row_id_column_name("restored_row_id")
+        .with_embedding_column(store.embedding_column_name())
         .build()?;
     println!("Restored store schema:\n{}", restored.schema());
     println!();
 
     // Get specific vector
     println!("Vector at index 0:");
-    let vectors_col = store.vectors();
+    let vectors_col = store
+        .column(store.embedding_column_name())
+        .expect("vector column missing after build");
     if let Some(vec) = vectors_col.vector_at(0) {
         println!("  {vec:?}");
     }
     println!();
 
     // Access pre-computed inverse norms
-    if let Some(inv_norms) = store.column(store.inv_norm_column_name()) {
+    if let Ok(inv_norms) = store.column(store.inv_norm_column_name()) {
         println!("Pre-computed inverse norms for cosine similarity:\n{inv_norms}");
         println!();
     }
@@ -94,8 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build a query: cosine similarity > 0.75 and age >= 28, take top 3 matches
     let query_vector = vec![1.0, 0.0, 0.0, 0.0];
     let results = store
-        .query(query_vector)
-        .filter(cosine().gt(0.7) & col("age").gte(28))
+        .query()
+        .with_query_vec(query_vector)
+        .filter(col("embedding").cosine().gt(0.7) & col("age").gte(28))
+        .order_by_desc()
         .take(3)
         .collect()?;
 

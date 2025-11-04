@@ -36,7 +36,7 @@ impl std::error::Error for ParseDateTimeError {}
 /// - RFC3339 / ISO8601
 /// - `YYYY-MM-DD`
 /// - `YYYY-MM-DD HH:MM:SS`
-pub(crate) fn parse_datetime_millis(input: &str) -> Result<i64, ParseDateTimeError> {
+pub fn parse_datetime_millis(input: &str) -> Result<i64, ParseDateTimeError> {
     parse_with_default_formats(input).ok_or_else(|| {
         ParseDateTimeError::new(
             input,
@@ -46,7 +46,7 @@ pub(crate) fn parse_datetime_millis(input: &str) -> Result<i64, ParseDateTimeErr
 }
 
 /// Parse a datetime string using an explicit format string.
-pub(crate) fn parse_datetime_millis_with_format(
+pub fn parse_datetime_millis_with_format(
     input: &str,
     format: &str,
 ) -> Result<i64, ParseDateTimeError> {
@@ -55,7 +55,7 @@ pub(crate) fn parse_datetime_millis_with_format(
 }
 
 /// Parse a datetime string with default formats, returning `None` on failure.
-pub(crate) fn try_parse_datetime_millis(input: &str) -> Option<i64> {
+pub fn try_parse_datetime_millis(input: &str) -> Option<i64> {
     parse_with_default_formats(input)
 }
 
