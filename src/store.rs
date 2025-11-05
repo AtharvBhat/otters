@@ -407,13 +407,6 @@ impl OttersStore {
         arrays[index] = new_array;
         fields[index] = new_field;
 
-        if fields.iter().any(|f| f.name() == &inv_norm_name) {
-            return Err(StoreError::ColumnAlreadyExists {
-                column: inv_norm_name.clone(),
-            }
-            .into());
-        }
-
         let list_array = arrays[index]
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
