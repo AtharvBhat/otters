@@ -2,26 +2,27 @@
 //!
 //! `OttersStore` starts in an unbuilt state with a single [`RecordBatch`].
 //! Configuration helpers like [`with_embedding_column`](Self::with_embedding_column)
-//! never return errors; they record validation issues internally so callers can
-//! chain them freely. [`build`](Self::build) is the single fallible step: it
-//! validates accumulated errors, materializes helper columns (inverse norms and
-//! row ids), and ensures the embedding column is a fixed-size Float32 vector.
+//! accumulate validation errors that surface when [`build`](Self::build) is invoked.
+//! `build` materializes helper columns (inverse norms and row ids) and validates the
+//! embedding column.
 
 use crate::col::{Column, OttersColumn};
+use crate::error::{OttersError, StoreError};
 use crate::query::OttersQuery;
 use crate::record::OttersRecord;
 use crate::vec_compute::inverse_norm;
 use arrow::array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Float32Builder, Float64Array,
-    GenericListArray, Int64Builder, LargeListArray, ListArray, OffsetSizeTrait, StringBuilder,
+    GenericListArray, Int64Array, Int64Builder, LargeListArray, ListArray, OffsetSizeTrait,
+    StringBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use arrow_csv::reader::Format;
-use arrow_csv::ReaderBuilder;
+use arrow_csv::{ReaderBuilder, WriterBuilder, reader::Format};
 use arrow_select::concat::concat_batches;
 use glob::glob;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_writer::ArrowWriter;
 use std::fmt;
 use std::fs::File;
 use std::io::Seek;
@@ -30,8 +31,6 @@ use std::sync::{Arc, Mutex};
 
 const DEFAULT_HEAD_ROWS: usize = 5;
 const ROW_ID_COLUMN: &str = "row_id";
-const UNBUILT_ERROR: &str =
-    "Store In an unbuilt state, Call build() method of the state to build it";
 
 /// Runtime state of the store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,62 +106,40 @@ impl OttersStore {
     }
 
     /// Load one or more Parquet files that match `pattern`.
-    pub fn from_parquet(pattern: impl AsRef<str>) -> Self {
-        let paths = match collect_paths(pattern.as_ref()) {
-            Ok(paths) => paths,
-            Err(err) => return Self::from_errors(vec![err]),
-        };
-
+    pub fn from_parquet(pattern: impl AsRef<str>) -> Result<Self, OttersError> {
+        let pattern_ref = pattern.as_ref();
+        let paths = collect_paths(pattern_ref)?;
         if paths.is_empty() {
-            return Self::from_errors(vec![format!(
-                "No parquet files matched pattern '{}'",
-                pattern.as_ref()
-            )]);
+            return Err(StoreError::NoFilesMatched {
+                pattern: pattern_ref.to_string(),
+                format: "parquet",
+            }
+            .into());
         }
 
         let mut batches = Vec::new();
-        let mut errors = Vec::new();
-
         for path in paths {
-            match read_parquet_batches(&path) {
-                Ok(mut chunk) => batches.append(&mut chunk),
-                Err(err) => errors.push(err),
-            }
-        }
-
-        if !errors.is_empty() {
-            return Self::from_errors(errors);
+            batches.extend(read_parquet_batches(&path)?);
         }
 
         Self::from_recordbatches(batches)
     }
 
     /// Load one or more CSV files that match `pattern` (header row expected).
-    pub fn from_csv(pattern: impl AsRef<str>) -> Self {
-        let paths = match collect_paths(pattern.as_ref()) {
-            Ok(paths) => paths,
-            Err(err) => return Self::from_errors(vec![err]),
-        };
-
+    pub fn from_csv(pattern: impl AsRef<str>) -> Result<Self, OttersError> {
+        let pattern_ref = pattern.as_ref();
+        let paths = collect_paths(pattern_ref)?;
         if paths.is_empty() {
-            return Self::from_errors(vec![format!(
-                "No CSV files matched pattern '{}'",
-                pattern.as_ref()
-            )]);
+            return Err(StoreError::NoFilesMatched {
+                pattern: pattern_ref.to_string(),
+                format: "CSV",
+            }
+            .into());
         }
 
         let mut batches = Vec::new();
-        let mut errors = Vec::new();
-
         for path in paths {
-            match read_csv_batches(&path) {
-                Ok(mut chunk) => batches.append(&mut chunk),
-                Err(err) => errors.push(err),
-            }
-        }
-
-        if !errors.is_empty() {
-            return Self::from_errors(errors);
+            batches.extend(read_csv_batches(&path)?);
         }
 
         Self::from_recordbatches(batches)
@@ -174,15 +151,13 @@ impl OttersStore {
     }
 
     /// Create a store from multiple [`RecordBatch`] instances.
-    pub fn from_recordbatches(batches: Vec<RecordBatch>) -> Self {
+    pub fn from_recordbatches(batches: Vec<RecordBatch>) -> Result<Self, OttersError> {
         if batches.is_empty() {
-            return Self::from_errors(vec!["Cannot build store from empty batch list".to_string()]);
+            return Err(StoreError::EmptyBatchList.into());
         }
 
-        match concat_record_batches(batches) {
-            Ok(batch) => Self::new_internal(batch),
-            Err(err) => Self::from_errors(vec![err]),
-        }
+        let batch = concat_record_batches(batches)?;
+        Ok(Self::new_internal(batch))
     }
 
     /// Build a store directly from columnar inputs.
@@ -210,7 +185,7 @@ impl OttersStore {
         let expected_rows = columns[0].len();
         if columns.iter().any(|col| col.len() != expected_rows) {
             return Self::from_errors(vec![
-                "All columns must have the same number of rows".to_string()
+                "All columns must have the same number of rows".to_string(),
             ]);
         }
 
@@ -302,14 +277,19 @@ impl OttersStore {
     }
 
     /// Fetch a column by name. Errors include the formatted schema when missing.
-    pub fn column(&self, name: &str) -> Result<OttersColumn, String> {
+    pub fn column(&self, name: &str) -> Result<OttersColumn, OttersError> {
         let schema = self.batch.schema();
-        let (index, field) = schema.column_with_name(name).ok_or_else(|| {
-            format!(
-                "Column '{name}' not found. Available schema:\n{}",
-                self.pretty_schema()
-            )
-        })?;
+        let (index, field) =
+            schema
+                .column_with_name(name)
+                .ok_or_else(|| StoreError::ColumnNotFound {
+                    column: name.to_string(),
+                    available: schema
+                        .fields()
+                        .iter()
+                        .map(|field| field.name().clone())
+                        .collect(),
+                })?;
         let array = self.batch.column(index).clone();
         Ok(OttersColumn::from_field(field.clone(), array))
     }
@@ -360,7 +340,7 @@ impl OttersStore {
         self.batch.schema()
     }
 
-    /// Set the embedding column for the store. Errors are recorded internally.
+    /// Set the embedding column for the store.
     pub fn with_embedding_column(mut self, column: impl Into<String>) -> Self {
         if self.is_ready() {
             self.add_error("Store already built; embedding column cannot be changed");
@@ -388,17 +368,17 @@ impl OttersStore {
     }
 
     /// Finalize the store, computing helper columns for querying.
-    pub fn build(mut self) -> Result<Self, String> {
+    pub fn build(mut self) -> Result<Self, OttersError> {
         if self.state == StoreState::Built {
-            return Err("Store already built".to_string());
+            return Err(StoreError::AlreadyBuilt.into());
+        }
+
+        if let Some(errs) = self.take_errors() {
+            return Err(OttersError::StoreValidation(errs));
         }
 
         if self.embedding_column.is_none() {
-            self.add_error("Embedding column not set; call with_embedding_column() before build()");
-        }
-
-        if let Some(err) = self.take_errors() {
-            return Err(err);
+            return Err(StoreError::EmbeddingColumnNotSet.into());
         }
 
         let schema = self.batch.schema();
@@ -411,65 +391,78 @@ impl OttersStore {
             .clone()
             .unwrap_or_else(|| format!("{embedding_name}_inv_norms"));
 
-        let (index, field) = match schema.column_with_name(&embedding_name) {
-            Some(pair) => pair,
-            None => {
-                self.add_error(format!(
-                    "Embedding column '{embedding_name}' missing during build. Schema:\n{}",
-                    self.pretty_schema()
-                ));
-                return Err(self.take_errors().unwrap());
-            }
-        };
+        let (index, field) =
+            schema
+                .column_with_name(&embedding_name)
+                .ok_or_else(|| StoreError::ColumnNotFound {
+                    column: embedding_name.clone(),
+                    available: schema
+                        .fields()
+                        .iter()
+                        .map(|field| field.name().clone())
+                        .collect(),
+                })?;
 
-        match convert_embedding_array(field, &arrays[index]) {
-            Ok((new_field, new_array)) => {
-                arrays[index] = new_array;
-                fields[index] = new_field;
-            }
-            Err(err) => {
-                self.add_error(err);
-                return Err(self.take_errors().unwrap());
-            }
-        }
+        let (new_field, new_array) = convert_embedding_array(field, &arrays[index])?;
+        arrays[index] = new_array;
+        fields[index] = new_field;
 
         if fields.iter().any(|f| f.name() == &inv_norm_name) {
-            return Err(format!(
-                "Column '{inv_norm_name}' already exists. Adjust embedding column name."
-            ));
+            return Err(StoreError::ColumnAlreadyExists {
+                column: inv_norm_name.clone(),
+            }
+            .into());
         }
 
         let list_array = arrays[index]
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
-            .ok_or_else(|| {
-                format!("Embedding column '{embedding_name}' must be FixedSizeList<Float32>")
+            .ok_or_else(|| StoreError::EmbeddingColumnType {
+                column: embedding_name.clone(),
+                reason: "expected FixedSizeList<Float32>",
             })?;
 
-        let inv_array = build_inv_norm_array(list_array, &embedding_name)?;
-        arrays.push(inv_array);
-        fields.push(Field::new(inv_norm_name.clone(), DataType::Float32, true));
-
-        if fields.iter().any(|f| f.name() == ROW_ID_COLUMN) {
-            self.add_error(format!(
-                "Column '{ROW_ID_COLUMN}' already exists. Rename it before building."
-            ));
-        } else {
-            let mut row_builder = Int64Builder::with_capacity(self.batch.num_rows());
-            for idx in 0..self.batch.num_rows() {
-                row_builder.append_value(idx as i64);
+        match fields.iter().position(|f| f.name() == &inv_norm_name) {
+            Some(idx) => {
+                arrays[idx]
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .ok_or_else(|| StoreError::ColumnTypeMismatch {
+                        column: inv_norm_name.clone(),
+                        expected: "Float32Array",
+                    })?;
             }
-            arrays.push(Arc::new(row_builder.finish()));
-            fields.push(Field::new(ROW_ID_COLUMN, DataType::Int64, false));
+            None => {
+                let inv_array = build_inv_norm_array(list_array, &embedding_name)?;
+                arrays.push(inv_array);
+                fields.push(Field::new(inv_norm_name.clone(), DataType::Float32, true));
+            }
         }
 
-        if let Some(err) = self.take_errors() {
-            return Err(err);
+        match fields.iter().position(|f| f.name() == ROW_ID_COLUMN) {
+            Some(idx) => {
+                let row_ids = arrays[idx]
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| StoreError::ColumnTypeMismatch {
+                        column: ROW_ID_COLUMN.to_string(),
+                        expected: "Int64Array",
+                    })?;
+                verify_row_ids(ROW_ID_COLUMN, row_ids, self.batch.num_rows())?;
+            }
+            None => {
+                let mut row_builder = Int64Builder::with_capacity(self.batch.num_rows());
+                for idx in 0..self.batch.num_rows() {
+                    row_builder.append_value(idx as i64);
+                }
+                arrays.push(Arc::new(row_builder.finish()));
+                fields.push(Field::new(ROW_ID_COLUMN, DataType::Int64, false));
+            }
         }
 
         let new_schema = Arc::new(Schema::new(fields));
         self.batch = RecordBatch::try_new(new_schema, arrays)
-            .map_err(|e| format!("Failed to finalize store: {e}"))?;
+            .map_err(|source| StoreError::Finalize { source })?;
         self.inv_norm_column = Some(inv_norm_name);
         self.state = StoreState::Built;
         Ok(self)
@@ -502,6 +495,71 @@ impl OttersStore {
         self.batch().cloned()
     }
 
+    /// Persist the store to a Parquet file.
+    pub fn write_parquet(&self, path: impl AsRef<Path>) -> Result<(), OttersError> {
+        self.ensure_ready()?;
+        let batch = self.batch().expect("store validated via ensure_ready()");
+
+        let out_path = path.as_ref();
+        let path_buf = out_path.to_path_buf();
+        let file = File::create(out_path).map_err(|source| StoreError::IoAction {
+            path: path_buf.clone(),
+            action: "create parquet file",
+            source,
+        })?;
+
+        let schema = batch.schema();
+        let mut writer = ArrowWriter::try_new(file, schema, None).map_err(|source| {
+            StoreError::ParquetAction {
+                path: path_buf.clone(),
+                action: "create parquet writer",
+                source,
+            }
+        })?;
+
+        writer
+            .write(batch)
+            .map_err(|source| StoreError::ParquetAction {
+                path: path_buf.clone(),
+                action: "write parquet batch",
+                source,
+            })?;
+
+        let _ = writer.close().map_err(|source| StoreError::ParquetAction {
+            path: path_buf,
+            action: "close parquet writer",
+            source,
+        })?;
+
+        Ok(())
+    }
+
+    /// Persist the store to a CSV file.
+    pub fn write_csv(&self, path: impl AsRef<Path>) -> Result<(), OttersError> {
+        self.ensure_ready()?;
+        let batch = self.batch().expect("store validated via ensure_ready()");
+
+        let out_path = path.as_ref();
+        let path_buf = out_path.to_path_buf();
+        let file = File::create(out_path).map_err(|source| StoreError::IoAction {
+            path: path_buf.clone(),
+            action: "create CSV file",
+            source,
+        })?;
+
+        let mut writer = WriterBuilder::new().with_header(true).build(file);
+
+        writer
+            .write(batch)
+            .map_err(|source| StoreError::ArrowAction {
+                path: path_buf.clone(),
+                action: "write CSV batch",
+                source,
+            })?;
+
+        Ok(())
+    }
+
     /// Last query statistics, if recorded.
     pub fn get_last_query_stats(&self) -> Option<OttersRecord> {
         self.last_query_stats
@@ -517,20 +575,20 @@ impl OttersStore {
         }
     }
 
-    /// Start a new query plan (errors are deferred until `collect()`).
+    /// Start a new query plan.
     pub fn query(&self) -> OttersQuery<'_> {
         let mut plan = OttersQuery::new(self);
         if !self.is_ready() {
-            plan.set_error(UNBUILT_ERROR.to_string());
+            plan.set_error(StoreError::NotBuilt.into());
         }
         plan
     }
 
-    pub fn ensure_ready(&self) -> Result<(), String> {
+    pub fn ensure_ready(&self) -> Result<(), OttersError> {
         if self.is_ready() {
             Ok(())
         } else {
-            Err(UNBUILT_ERROR.to_string())
+            Err(StoreError::NotBuilt.into())
         }
     }
 }
@@ -553,112 +611,145 @@ impl fmt::Display for OttersStore {
                 f,
                 "Call build() after selecting embedding columns to enable querying."
             )?;
-            if !self.errors.is_empty() {
-                writeln!(f, "Pending errors:")?;
-                for err in &self.errors {
-                    writeln!(f, "- {err}")?;
-                }
-            }
         }
         Ok(())
     }
 }
 
-fn concat_record_batches(mut batches: Vec<RecordBatch>) -> Result<RecordBatch, String> {
+fn concat_record_batches(mut batches: Vec<RecordBatch>) -> Result<RecordBatch, OttersError> {
     if batches.len() == 1 {
         return Ok(batches.remove(0));
     }
 
     let schema = batches[0].schema();
-    concat_batches(&schema, &batches).map_err(|e| format!("Failed to concatenate batches: {e}"))
+    concat_batches(&schema, &batches).map_err(|source| StoreError::Concatenate { source }.into())
 }
 
-fn collect_paths(pattern: &str) -> Result<Vec<PathBuf>, String> {
+fn collect_paths(pattern: &str) -> Result<Vec<PathBuf>, OttersError> {
     let mut paths = Vec::new();
-    for entry in glob(pattern).map_err(|e| format!("Invalid glob pattern '{pattern}': {e}"))? {
+    for entry in glob(pattern).map_err(|source| OttersError::GlobPattern {
+        pattern: pattern.to_string(),
+        source,
+    })? {
         match entry {
             Ok(path) if path.is_file() => paths.push(path),
             Ok(_) => {}
-            Err(err) => return Err(format!("Failed to read glob entry: {err}")),
+            Err(source) => return Err(OttersError::GlobWalk { source }),
         }
     }
     Ok(paths)
 }
 
-fn read_parquet_batches(path: &Path) -> Result<Vec<RecordBatch>, String> {
-    let file = File::open(path)
-        .map_err(|e| format!("Failed to open parquet file '{}': {e}", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        format!(
-            "Failed to create parquet reader for '{}': {e}",
-            path.display()
-        )
+fn read_parquet_batches(path: &Path) -> Result<Vec<RecordBatch>, OttersError> {
+    let owned = path.to_path_buf();
+    let file = File::open(path).map_err(|source| StoreError::IoAction {
+        path: owned.clone(),
+        action: "open parquet file",
+        source,
     })?;
-    let reader = builder.build().map_err(|e| {
-        format!(
-            "Failed to build parquet reader for '{}': {e}",
-            path.display()
-        )
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|source| {
+        StoreError::ParquetAction {
+            path: owned.clone(),
+            action: "create parquet reader",
+            source,
+        }
     })?;
+    let reader = builder
+        .build()
+        .map_err(|source| StoreError::ParquetAction {
+            path: owned.clone(),
+            action: "build parquet reader",
+            source,
+        })?;
 
-    reader.collect::<Result<Vec<_>, _>>().map_err(|e| {
-        format!(
-            "Failed to read parquet batches from '{}': {e}",
-            path.display()
-        )
+    reader.collect::<Result<Vec<_>, _>>().map_err(|source| {
+        StoreError::ArrowAction {
+            path: owned,
+            action: "read parquet batches",
+            source,
+        }
+        .into()
     })
 }
 
-fn read_csv_batches(path: &Path) -> Result<Vec<RecordBatch>, String> {
-    let mut file = File::open(path)
-        .map_err(|e| format!("Failed to open CSV file '{}': {e}", path.display()))?;
+fn read_csv_batches(path: &Path) -> Result<Vec<RecordBatch>, OttersError> {
+    let owned = path.to_path_buf();
+    let mut file = File::open(path).map_err(|source| StoreError::IoAction {
+        path: owned.clone(),
+        action: "open CSV file",
+        source,
+    })?;
     let format = Format::default().with_header(true);
-    let (schema, _) = format
-        .infer_schema(&mut file, None)
-        .map_err(|e| format!("Failed to infer CSV schema for '{}': {e}", path.display()))?;
-    file.rewind()
-        .map_err(|e| format!("Failed to rewind CSV file '{}': {e}", path.display()))?;
+    let (schema, _) =
+        format
+            .infer_schema(&mut file, None)
+            .map_err(|source| StoreError::ArrowAction {
+                path: owned.clone(),
+                action: "infer CSV schema",
+                source,
+            })?;
+    file.rewind().map_err(|source| StoreError::IoAction {
+        path: owned.clone(),
+        action: "rewind CSV file",
+        source,
+    })?;
 
     let reader = ReaderBuilder::new(Arc::new(schema))
         .with_format(format)
         .build(file)
-        .map_err(|e| format!("Failed to create CSV reader for '{}': {e}", path.display()))?;
+        .map_err(|source| StoreError::ArrowAction {
+            path: owned.clone(),
+            action: "create CSV reader",
+            source,
+        })?;
 
-    reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to read CSV batches from '{}': {e}", path.display()))
+    reader.collect::<Result<Vec<_>, _>>().map_err(|source| {
+        StoreError::ArrowAction {
+            path: owned,
+            action: "read CSV batches",
+            source,
+        }
+        .into()
+    })
 }
 
-fn convert_embedding_array(field: &Field, array: &ArrayRef) -> Result<(Field, ArrayRef), String> {
+fn convert_embedding_array(
+    field: &Field,
+    array: &ArrayRef,
+) -> Result<(Field, ArrayRef), OttersError> {
     match array.data_type() {
         DataType::FixedSizeList(inner, dim) => match inner.data_type() {
             DataType::Float32 => Ok(convert_existing_fixed_size(field, array.clone())),
             DataType::Float64 => convert_fixed_size_float64(field, array, *dim),
-            other => Err(format!(
-                "Embedding column '{}' must contain Float32 or Float64 values, found {other:?}",
-                field.name()
-            )),
+            _ => Err(StoreError::EmbeddingValueType {
+                column: field.name().to_string(),
+            }
+            .into()),
         },
         DataType::List(_) => {
-            let list = array
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .ok_or_else(|| "Failed to downcast embedding column to ListArray".to_string())?;
+            let list = array.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+                StoreError::EmbeddingColumnType {
+                    column: field.name().to_string(),
+                    reason: "expected List<Float32> or List<Float64>",
+                }
+            })?;
             convert_generic_list(field, list)
         }
         DataType::LargeList(_) => {
             let list = array
                 .as_any()
                 .downcast_ref::<LargeListArray>()
-                .ok_or_else(|| {
-                    "Failed to downcast embedding column to LargeListArray".to_string()
+                .ok_or_else(|| StoreError::EmbeddingColumnType {
+                    column: field.name().to_string(),
+                    reason: "expected LargeList<Float32> or LargeList<Float64>",
                 })?;
             convert_generic_list(field, list)
         }
-        other => Err(format!(
-            "Embedding column '{}' must be a list of Float32/Float64 values, found {other:?}",
-            field.name()
-        )),
+        _ => Err(StoreError::EmbeddingColumnType {
+            column: field.name().to_string(),
+            reason: "unsupported Arrow data type for embeddings",
+        }
+        .into()),
     }
 }
 
@@ -678,11 +769,14 @@ fn convert_fixed_size_float64(
     field: &Field,
     array: &ArrayRef,
     dim: i32,
-) -> Result<(Field, ArrayRef), String> {
+) -> Result<(Field, ArrayRef), OttersError> {
     let list = array
         .as_any()
         .downcast_ref::<FixedSizeListArray>()
-        .ok_or_else(|| "Failed to downcast embedding column to FixedSizeListArray".to_string())?;
+        .ok_or_else(|| StoreError::EmbeddingColumnType {
+            column: field.name().to_string(),
+            reason: "expected FixedSizeList<Float64>",
+        })?;
 
     let mut builder = Column::new_vector(field.name(), dim);
     let mut buffer = Vec::with_capacity(dim as usize);
@@ -697,15 +791,15 @@ fn convert_fixed_size_float64(
         let values = values
             .as_any()
             .downcast_ref::<Float64Array>()
-            .ok_or_else(|| "Embedding column must contain Float64 values".to_string())?;
+            .ok_or_else(|| StoreError::EmbeddingValueType {
+                column: field.name().to_string(),
+            })?;
         buffer.clear();
         copy_numeric_values(values, dim as usize, &mut buffer, field.name())?;
         builder = builder.append([Some(buffer.as_slice())]);
     }
 
-    let column = builder
-        .collect()
-        .map_err(|e| format!("Failed to rebuild embedding column '{}': {e}", field.name()))?;
+    let column = builder.collect()?;
     let array = column.array().clone();
     let mut new_field = Field::new(
         field.name().clone(),
@@ -721,7 +815,7 @@ fn convert_fixed_size_float64(
 fn convert_generic_list<O: OffsetSizeTrait>(
     field: &Field,
     list: &GenericListArray<O>,
-) -> Result<(Field, ArrayRef), String> {
+) -> Result<(Field, ArrayRef), OttersError> {
     let mut rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(list.len());
     let mut dim: Option<i32> = None;
 
@@ -736,41 +830,43 @@ fn convert_generic_list<O: OffsetSizeTrait>(
 
         if let Some(arr) = values.as_any().downcast_ref::<Float32Array>() {
             if arr.null_count() > 0 {
-                return Err(format!(
-                    "Embedding column '{}' contains null values; clean the data before loading",
-                    field.name()
-                ));
+                return Err(StoreError::EmbeddingContainsNulls {
+                    column: field.name().to_string(),
+                }
+                .into());
             }
             row_values.extend_from_slice(arr.values());
         } else if let Some(arr64) = values.as_any().downcast_ref::<Float64Array>() {
             if arr64.null_count() > 0 {
-                return Err(format!(
-                    "Embedding column '{}' contains null values; clean the data before loading",
-                    field.name()
-                ));
+                return Err(StoreError::EmbeddingContainsNulls {
+                    column: field.name().to_string(),
+                }
+                .into());
             }
             row_values.extend(arr64.values().iter().map(|v| *v as f32));
         } else {
-            return Err(format!(
-                "Embedding column '{}' must contain Float32/Float64 values",
-                field.name()
-            ));
+            return Err(StoreError::EmbeddingValueType {
+                column: field.name().to_string(),
+            }
+            .into());
         }
 
         let row_dim = row_values.len() as i32;
         if row_dim == 0 {
-            return Err(format!(
-                "Embedding column '{}' contains empty vectors",
-                field.name()
-            ));
+            return Err(StoreError::EmbeddingEmptyVectors {
+                column: field.name().to_string(),
+            }
+            .into());
         }
 
         if let Some(existing) = dim {
             if existing != row_dim {
-                return Err(format!(
-                    "Embedding column '{}' has inconsistent vector dimensions: {existing} vs {row_dim}",
-                    field.name()
-                ));
+                return Err(StoreError::EmbeddingDimensionMismatch {
+                    column: field.name().to_string(),
+                    expected: existing,
+                    found: row_dim,
+                }
+                .into());
             }
         } else {
             dim = Some(row_dim);
@@ -779,11 +875,8 @@ fn convert_generic_list<O: OffsetSizeTrait>(
         rows.push(Some(row_values));
     }
 
-    let dim = dim.ok_or_else(|| {
-        format!(
-            "Embedding column '{}' contains only null values; unable to infer dimension",
-            field.name()
-        )
+    let dim = dim.ok_or_else(|| StoreError::EmbeddingAllNull {
+        column: field.name().to_string(),
     })?;
 
     let mut builder = Column::new_vector(field.name(), dim);
@@ -794,9 +887,7 @@ fn convert_generic_list<O: OffsetSizeTrait>(
         }
     }
 
-    let column = builder
-        .collect()
-        .map_err(|e| format!("Failed to rebuild embedding column '{}': {e}", field.name()))?;
+    let column = builder.collect()?;
     let array = column.array().clone();
     let mut new_field = Field::new(
         field.name().clone(),
@@ -814,24 +905,27 @@ fn copy_numeric_values(
     expected_len: usize,
     buffer: &mut Vec<f32>,
     column: &str,
-) -> Result<(), String> {
+) -> Result<(), OttersError> {
     if values.null_count() > 0 {
-        return Err(format!(
-            "Embedding column '{column}' contains null values; please clean the data before loading"
-        ));
+        return Err(StoreError::EmbeddingContainsNulls {
+            column: column.to_string(),
+        }
+        .into());
     }
     if values.len() != expected_len {
-        return Err(format!(
-            "Embedding column '{column}' contains inconsistent lengths ({})",
-            values.len()
-        ));
+        return Err(StoreError::EmbeddingLengthMismatch {
+            column: column.to_string(),
+            expected: expected_len,
+            found: values.len(),
+        }
+        .into());
     }
     buffer.clear();
     buffer.extend(values.values().iter().map(|v| *v as f32));
     Ok(())
 }
 
-fn build_inv_norm_array(list: &FixedSizeListArray, name: &str) -> Result<ArrayRef, String> {
+fn build_inv_norm_array(list: &FixedSizeListArray, name: &str) -> Result<ArrayRef, OttersError> {
     let mut builder = Float32Builder::with_capacity(list.len());
 
     for row in 0..list.len() {
@@ -844,15 +938,49 @@ fn build_inv_norm_array(list: &FixedSizeListArray, name: &str) -> Result<ArrayRe
         let values = values
             .as_any()
             .downcast_ref::<Float32Array>()
-            .ok_or_else(|| "Embedding vectors must contain Float32 values".to_string())?;
+            .ok_or_else(|| StoreError::EmbeddingVectorType {
+                column: name.to_string(),
+            })?;
         if values.null_count() > 0 {
-            return Err(format!(
-                "Embedding column '{name}' contains null vector entries; clean the data before building"
-            ));
+            return Err(StoreError::EmbeddingVectorsContainNulls {
+                column: name.to_string(),
+            }
+            .into());
         }
         let inv = inverse_norm(values.values());
         builder.append_value(inv);
     }
 
     Ok(Arc::new(builder.finish()))
+}
+
+fn verify_row_ids(
+    column: &str,
+    array: &Int64Array,
+    expected_len: usize,
+) -> Result<(), OttersError> {
+    if array.len() != expected_len {
+        return Err(StoreError::RowIdIntegrity {
+            column: column.to_string(),
+        }
+        .into());
+    }
+
+    for idx in 0..array.len() {
+        if array.is_null(idx) {
+            return Err(StoreError::RowIdIntegrity {
+                column: column.to_string(),
+            }
+            .into());
+        }
+        let value = array.value(idx);
+        if value < 0 || value != idx as i64 {
+            return Err(StoreError::RowIdIntegrity {
+                column: column.to_string(),
+            }
+            .into());
+        }
+    }
+
+    Ok(())
 }

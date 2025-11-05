@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let test_store = load_store(&[test_shard.clone()])?;
     println!("Test store rows: {}\n", test_store.len());
 
-    if test_store.len() == 0 {
+    if test_store.is_empty() {
         println!("Test shard had no rows, exiting.");
         return Ok(());
     }
@@ -120,8 +120,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .order_by_desc()
             .take(top_k)
             .collect()
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            .map_err(io::Error::other)?;
         let latency = query_start.elapsed().as_secs_f64();
+        let latency_ms = latency * 1_000.0;
 
         accumulated_latency += latency;
         if latency < min_latency {
@@ -130,16 +131,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if latency > max_latency {
             max_latency = latency;
         }
-        last_latency_ms = Some(latency * 1_000.0);
+        last_latency_ms = Some(latency_ms);
         last_query_id = Some(id.clone());
-        last_match_count = Some(result.batch.num_rows());
+        let matches = result.batch.num_rows();
+        last_match_count = Some(matches);
         total_queries += 1;
 
         if total_queries <= 3 {
             println!(
-                "Query #{total_queries} (id={id}) returned {} matches in {:.2} ms",
-                result.batch.num_rows(),
-                latency * 1_000.0
+                "Query #{total_queries} (id={id}) returned {matches} matches in {latency_ms:.2} ms"
             );
         }
     }
@@ -147,19 +147,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wall_time = overall_start.elapsed().as_secs_f64();
     println!("\n=== Summary ===");
     println!("Total queries run : {total_queries}");
-    println!("Total wall time   : {:.3} s", wall_time);
+    println!("Total wall time   : {wall_time:.3} s");
 
     if total_queries > 0 {
-        println!(
-            "Average per-query : {:.3} ms",
-            (accumulated_latency / total_queries as f64) * 1_000.0
-        );
-        println!(
-            "Queries per second: {:.2}",
-            total_queries as f64 / wall_time
-        );
-        println!("Fastest query     : {:.2} ms", min_latency * 1_000.0);
-        println!("Slowest query     : {:.2} ms", max_latency * 1_000.0);
+        let avg_latency_ms = (accumulated_latency / total_queries as f64) * 1_000.0;
+        println!("Average per-query : {avg_latency_ms:.3} ms");
+        let qps = total_queries as f64 / wall_time;
+        println!("Queries per second: {qps:.2}");
+        let fastest_ms = min_latency * 1_000.0;
+        let slowest_ms = max_latency * 1_000.0;
+        println!("Fastest query     : {fastest_ms:.2} ms");
+        println!("Slowest query     : {slowest_ms:.2} ms");
     } else {
         println!("No embeddings found in the test shard.");
     }
@@ -168,8 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (last_query_id.as_ref(), last_latency_ms, last_match_count)
     {
         println!(
-            "Last query #{total_queries} (id={id}) latency: {:.2} ms, matches: {matches}",
-            latency_ms
+            "Last query #{total_queries} (id={id}) latency: {latency_ms:.2} ms, matches: {matches}"
         );
     }
 
@@ -187,14 +184,13 @@ fn find_train_shards(base: &Path) -> io::Result<Vec<PathBuf>> {
     let pattern = pattern.to_string_lossy().into_owned();
     let mut shards = Vec::new();
 
-    for entry in glob(&pattern).map_err(|err| io::Error::new(io::ErrorKind::Other, err.msg))? {
+    for entry in glob(&pattern).map_err(|err| io::Error::other(err.msg))? {
         match entry {
             Ok(path) => shards.push(path),
             Err(err) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to read glob entry: {err}"),
-                ));
+                return Err(io::Error::other(format!(
+                    "Failed to read glob entry: {err}"
+                )));
             }
         }
     }
@@ -209,29 +205,23 @@ fn load_store(paths: &[PathBuf]) -> Result<OttersStore, Box<dyn std::error::Erro
         println!("Loading {}", path.display());
         let file = File::open(path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|err| {
-                io::Error::new(io::ErrorKind::Other, format!("{}: {err}", path.display()))
-            })?
+            .map_err(|err| io::Error::other(format!("{}: {err}", path.display())))?
             .build()
-            .map_err(|err| {
-                io::Error::new(io::ErrorKind::Other, format!("{}: {err}", path.display()))
-            })?;
+            .map_err(|err| io::Error::other(format!("{}: {err}", path.display())))?;
 
         for batch in reader {
             let batch = batch.map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("{}: failed to read batch: {err}", path.display()),
-                )
+                io::Error::other(format!("{}: failed to read batch: {err}", path.display()))
             })?;
             batches.push(batch);
         }
     }
 
-    let store = OttersStore::from_recordbatches(batches)
+    let store = OttersStore::from_recordbatches(batches).map_err(io::Error::other)?;
+    let store = store
         .with_embedding_column(EMBEDDING_COLUMN)
         .build()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        .map_err(io::Error::other)?;
     Ok(store)
 }
 

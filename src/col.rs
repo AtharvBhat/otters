@@ -3,6 +3,7 @@
 //! Thin wrapper around Apache Arrow arrays for convenient column operations.
 
 use crate::datetime::{parse_datetime_millis, parse_datetime_millis_with_format};
+use crate::error::{ColumnError, OttersError};
 use arrow::array::{
     Array, ArrayRef, FixedSizeListArray, FixedSizeListBuilder, Float32Array, Float64Array,
     Int32Array, Int64Array, PrimitiveBuilder, StringArray, StringBuilder,
@@ -11,35 +12,11 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Int32Type, Int64Type, TimeUnit};
 use chrono::DateTime;
 use std::fmt;
+use std::sync::Arc;
 
 // Re-export Arrow types for convenience
 pub use arrow::datatypes::DataType as ArrowDataType;
 pub use arrow::datatypes::Field as ArrowField;
-
-#[derive(Debug)]
-pub enum ColumnError {
-    TypeMismatch(String),
-    ParseError(String),
-    ArrowError(String),
-}
-
-impl fmt::Display for ColumnError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ColumnError::TypeMismatch(msg) => write!(f, "Type mismatch: {msg}"),
-            ColumnError::ParseError(msg) => write!(f, "Parse error: {msg}"),
-            ColumnError::ArrowError(msg) => write!(f, "Arrow error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for ColumnError {}
-
-impl From<arrow::error::ArrowError> for ColumnError {
-    fn from(e: arrow::error::ArrowError) -> Self {
-        ColumnError::ArrowError(e.to_string())
-    }
-}
 
 /// Arrow-backed column - just a thin wrapper around Arrow arrays
 pub struct OttersColumn {
@@ -319,7 +296,10 @@ impl Column {
                 match parsed {
                     Ok(ts) => Some(ts),
                     Err(err) => {
-                        self.error = Some(ColumnError::ParseError(err.to_string()));
+                        self.error = Some(ColumnError::DateTime {
+                            input: s.to_string(),
+                            source: err,
+                        });
                         return self;
                     }
                 }
@@ -329,10 +309,7 @@ impl Column {
     }
 
     /// Build the final column (consumes the builder)
-    pub fn collect(self) -> Result<OttersColumn, ColumnError> {
-        // finish() returns concrete array types, we need to wrap them in Arc for ArrayRef
-        use std::sync::Arc;
-
+    pub fn collect(self) -> Result<OttersColumn, OttersError> {
         let Column {
             name,
             builder,
@@ -341,7 +318,7 @@ impl Column {
         } = self;
 
         if let Some(err) = error {
-            return Err(err);
+            return Err(err.into());
         }
 
         let array: ArrayRef = match builder {
@@ -490,9 +467,9 @@ impl<'a> ColumnAppendTarget<'a> {
                 b.append_option(value);
                 Ok(())
             }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Int32 builder".to_string(),
-            )),
+            _ => Err(ColumnError::TypeMismatch {
+                detail: "Expected Int32 builder",
+            }),
         }
     }
 
@@ -506,9 +483,9 @@ impl<'a> ColumnAppendTarget<'a> {
                 b.append_option(value);
                 Ok(())
             }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Int64 or Timestamp builder".to_string(),
-            )),
+            _ => Err(ColumnError::TypeMismatch {
+                detail: "Expected Int64 or Timestamp builder",
+            }),
         }
     }
 
@@ -518,9 +495,9 @@ impl<'a> ColumnAppendTarget<'a> {
                 b.append_option(value);
                 Ok(())
             }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Float32 builder".to_string(),
-            )),
+            _ => Err(ColumnError::TypeMismatch {
+                detail: "Expected Float32 builder",
+            }),
         }
     }
 
@@ -530,9 +507,9 @@ impl<'a> ColumnAppendTarget<'a> {
                 b.append_option(value);
                 Ok(())
             }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Float64 builder".to_string(),
-            )),
+            _ => Err(ColumnError::TypeMismatch {
+                detail: "Expected Float64 builder",
+            }),
         }
     }
 
@@ -542,9 +519,9 @@ impl<'a> ColumnAppendTarget<'a> {
                 b.append_option(value);
                 Ok(())
             }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected String builder".to_string(),
-            )),
+            _ => Err(ColumnError::TypeMismatch {
+                detail: "Expected String builder",
+            }),
         }
     }
 
@@ -561,9 +538,9 @@ impl<'a> ColumnAppendTarget<'a> {
                 }
                 Ok(())
             }
-            _ => Err(ColumnError::TypeMismatch(
-                "Expected Vector builder".to_string(),
-            )),
+            _ => Err(ColumnError::TypeMismatch {
+                detail: "Expected Vector builder",
+            }),
         }
     }
 

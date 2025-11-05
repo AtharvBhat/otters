@@ -3,6 +3,7 @@
 //! Import everything you typically need with:
 //! `use otters::prelude::*;`.
 
+pub use crate::error::OttersError;
 // Main store type
 pub use crate::store::OttersStore;
 // Query planner

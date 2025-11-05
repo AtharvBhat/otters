@@ -24,6 +24,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::error::{OttersError, QueryError};
 use crate::expr::{
     CmpOp, ColumnFilter, CompiledFilter, DataType as ExprDataType, Expr, MetadataPlan, MetricExpr,
     MetricPlan,
@@ -147,8 +148,8 @@ pub struct OttersQuery<'a> {
     metric: Option<QueryMetric>,
     filter_expr: Option<Expr>,
     top_k: Option<usize>,
-    error: Option<String>,
     order_desc: Option<bool>,
+    error: Option<OttersError>,
 }
 
 impl<'a> OttersQuery<'a> {
@@ -160,43 +161,36 @@ impl<'a> OttersQuery<'a> {
             metric: None,
             filter_expr: None,
             top_k: None,
-            error: None,
             order_desc: None,
+            error: None,
         }
     }
 
-    pub fn set_error(&mut self, err: String) {
+    pub fn set_error(&mut self, err: OttersError) {
         if self.error.is_none() {
             self.error = Some(err);
         }
     }
 
     pub fn with_query_vec(mut self, vector: Vec<f32>) -> Self {
-        if let Err(err) = self.set_query_vector_internal(vector) {
-            self.error = Some(err);
+        if self.error.is_none() {
+            if let Err(err) = self.set_query_vector_internal(vector) {
+                self.set_error(err);
+            }
         }
         self
     }
 
-    fn set_query_vector_internal(&mut self, vector: Vec<f32>) -> Result<(), String> {
-        if self.error.is_some() {
-            return Err(self
-                .error
-                .clone()
-                .unwrap_or_else(|| "Query already failed initialization".to_string()));
-        }
-
+    fn set_query_vector_internal(&mut self, vector: Vec<f32>) -> Result<(), OttersError> {
         self.store.ensure_ready()?;
 
         let expected = self.store.dim() as usize;
         if vector.len() != expected {
-            let msg = format!(
-                "Query vector dimension {} does not match store dimension {}",
-                vector.len(),
-                expected
-            );
-            self.error = Some(msg.clone());
-            return Err(msg);
+            return Err(QueryError::DimensionMismatch {
+                expected,
+                actual: vector.len(),
+            }
+            .into());
         }
 
         let inv_norm = inverse_norm(&vector);
@@ -223,19 +217,17 @@ impl<'a> OttersQuery<'a> {
 
     /// Select the metric to use for scoring.
     pub fn metric(mut self, metric: QueryMetric) -> Self {
-        if self.error.is_some() {
-            return self;
+        if self.error.is_none() {
+            self.metric = Some(metric);
         }
-        self.metric = Some(metric);
         self
     }
 
     /// Attach a metadata expression that will be compiled during execution.
     pub fn filter(mut self, filter: Expr) -> Self {
-        if self.error.is_some() {
-            return self;
+        if self.error.is_none() {
+            self.filter_expr = Some(filter);
         }
-        self.filter_expr = Some(filter);
         self
     }
 
@@ -244,15 +236,17 @@ impl<'a> OttersQuery<'a> {
     /// Similarity metrics (`Cosine`, `DotProduct`) return the highest scores first,
     /// while distance metrics (`Euclidean`) return the smallest distances first.
     pub fn take(mut self, k: usize) -> Self {
-        if self.error.is_some() {
-            return self;
+        if self.error.is_none() {
+            self.top_k = Some(k);
         }
-        self.top_k = Some(k);
         self
     }
 
     /// Execute the query plan and return the materialized results.
-    pub fn collect(self) -> Result<QueryOutput, String> {
+    pub fn collect(self) -> Result<QueryOutput, OttersError> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
         QueryExecution::from_query(self)?.execute()
     }
 }
@@ -270,7 +264,7 @@ struct QueryExecution<'a> {
 }
 
 impl<'a> QueryExecution<'a> {
-    fn from_query(query: OttersQuery<'a>) -> Result<Self, String> {
+    fn from_query(query: OttersQuery<'a>) -> Result<Self, OttersError> {
         let OttersQuery {
             store,
             query_vector,
@@ -279,16 +273,12 @@ impl<'a> QueryExecution<'a> {
             filter_expr,
             top_k,
             order_desc,
-            error,
+            error: _,
         } = query;
 
         store.ensure_ready()?;
 
-        if let Some(err) = error {
-            return Err(err);
-        }
-
-        let query = query_vector.ok_or_else(|| "Query vector not provided".to_string())?;
+        let query = query_vector.ok_or(QueryError::MissingQueryVector)?;
         let inv_norm = query_inv_norm.unwrap_or_else(|| inverse_norm(&query));
 
         Ok(Self {
@@ -304,7 +294,7 @@ impl<'a> QueryExecution<'a> {
         })
     }
 
-    fn execute(mut self) -> Result<QueryOutput, String> {
+    fn execute(mut self) -> Result<QueryOutput, OttersError> {
         let total_start = Instant::now();
 
         let compiled = self.compile_filter()?;
@@ -327,7 +317,7 @@ impl<'a> QueryExecution<'a> {
         Ok(output)
     }
 
-    fn compile_filter(&mut self) -> Result<Option<CompiledFilter>, String> {
+    fn compile_filter(&mut self) -> Result<Option<CompiledFilter>, OttersError> {
         match self.filter_expr.take() {
             Some(expr) => {
                 let start = Instant::now();
@@ -339,28 +329,34 @@ impl<'a> QueryExecution<'a> {
         }
     }
 
-    fn resolve_metric(&self, metric_plan: &MetricPlan) -> Result<QueryMetric, String> {
+    fn resolve_metric(&self, metric_plan: &MetricPlan) -> Result<QueryMetric, OttersError> {
         self.validate_metric_columns(metric_plan)?;
         let inferred = metric_from_plan(metric_plan)?;
         match (self.metric_hint, inferred) {
-            (Some(explicit), Some(inferred_metric)) if explicit != inferred_metric => Err(format!(
-                "Metric {explicit:?} specified in query conflicts with metric {inferred_metric:?} in filter"
-            )),
+            (Some(explicit), Some(inferred_metric)) if explicit != inferred_metric => {
+                Err(QueryError::MetricConflict {
+                    explicit,
+                    inferred: inferred_metric,
+                }
+                .into())
+            }
             (Some(explicit), _) => Ok(explicit),
             (None, Some(inferred_metric)) => Ok(inferred_metric),
             (None, None) => Ok(QueryMetric::Cosine),
         }
     }
 
-    fn validate_metric_columns(&self, metric_plan: &MetricPlan) -> Result<(), String> {
+    fn validate_metric_columns(&self, metric_plan: &MetricPlan) -> Result<(), OttersError> {
         let expected = self.store.embedding_column_name();
         for clause in metric_plan {
             for filter in clause {
                 if let Some(column) = &filter.column {
                     if column != expected {
-                        return Err(format!(
-                            "Metric filter references embedding column '{column}' but store is configured with '{expected}'"
-                        ));
+                        return Err(QueryError::MetricColumnMismatch {
+                            column: column.clone(),
+                            expected: expected.to_string(),
+                        }
+                        .into());
                     }
                 }
             }
@@ -368,7 +364,7 @@ impl<'a> QueryExecution<'a> {
         Ok(())
     }
 
-    fn apply_metadata(&mut self, plan: &MetadataPlan) -> Result<MetadataSelection, String> {
+    fn apply_metadata(&mut self, plan: &MetadataPlan) -> Result<MetadataSelection, OttersError> {
         let start = Instant::now();
         let (selection, stats) = apply_metadata_filters(self.store, plan)?;
         self.durations
@@ -382,7 +378,7 @@ impl<'a> QueryExecution<'a> {
         selection: &MetadataSelection,
         metric: QueryMetric,
         metric_plan: &MetricPlan,
-    ) -> Result<Vec<ScoredRow>, String> {
+    ) -> Result<Vec<ScoredRow>, OttersError> {
         let start = Instant::now();
         let scored = score_candidates(
             self.store,
@@ -397,7 +393,7 @@ impl<'a> QueryExecution<'a> {
         Ok(scored)
     }
 
-    fn materialize(&mut self, mut scored: Vec<ScoredRow>) -> Result<QueryOutput, String> {
+    fn materialize(&mut self, mut scored: Vec<ScoredRow>) -> Result<QueryOutput, OttersError> {
         if scored.is_empty() {
             let materialize_start = Instant::now();
             let output = build_empty_output(self.store)?;
@@ -436,7 +432,7 @@ impl<'a> QueryExecution<'a> {
         Ok(output)
     }
 
-    fn record_stats(&self, vector_stats: (u64, u64)) -> Result<(), String> {
+    fn record_stats(&self, vector_stats: (u64, u64)) -> Result<(), OttersError> {
         let stats_batch =
             build_query_stats_batch(&self.durations, &self.metadata_stats, Some(vector_stats))?;
         self.store.set_last_query_stats(stats_batch);
@@ -444,14 +440,14 @@ impl<'a> QueryExecution<'a> {
     }
 }
 
-fn compile_expr(store: &OttersStore, expr: Expr) -> Result<CompiledFilter, String> {
+fn compile_expr(store: &OttersStore, expr: Expr) -> Result<CompiledFilter, OttersError> {
     let mut schema_map: HashMap<String, ExprDataType> = HashMap::new();
     for field in store.arrow_schema().fields() {
         if let Some(dtype) = arrow_to_otters_type(field.data_type()) {
             schema_map.insert(field.name().clone(), dtype);
         }
     }
-    expr.compile(&schema_map).map_err(|e| e.to_string())
+    expr.compile(&schema_map).map_err(OttersError::from)
 }
 
 fn arrow_to_otters_type(data_type: &DataType) -> Option<ExprDataType> {
@@ -473,7 +469,7 @@ fn arrow_to_otters_type(data_type: &DataType) -> Option<ExprDataType> {
 pub fn apply_metadata_filters(
     store: &OttersStore,
     plan: &MetadataPlan,
-) -> Result<(MetadataSelection, Vec<MetadataColumnStats>), String> {
+) -> Result<(MetadataSelection, Vec<MetadataColumnStats>), OttersError> {
     let batch = store
         .batch()
         .expect("store must be built before applying metadata filters");
@@ -487,7 +483,7 @@ pub fn apply_metadata_filters(
         ));
     }
 
-    let clause_results: Result<Vec<(BooleanArray, Vec<MetadataColumnStats>)>, String> = plan
+    let clause_results: Result<Vec<(BooleanArray, Vec<MetadataColumnStats>)>, OttersError> = plan
         .par_iter()
         .map(|clause| evaluate_clause(batch, clause))
         .collect();
@@ -516,7 +512,7 @@ pub fn apply_metadata_filters(
         .pop()
         .expect("clause masks should be non-empty after evaluation");
     for mask in clause_masks.iter() {
-        combined = and_kleene(&combined, mask).map_err(|e| e.to_string())?;
+        combined = and_kleene(&combined, mask)?;
     }
 
     let filtered_ids = filter_int64(&row_ids, &combined)?;
@@ -540,18 +536,16 @@ pub fn metric_plan_from(compiled: &crate::expr::CompiledFilter) -> MetricPlan {
 fn evaluate_clause(
     batch: &RecordBatch,
     clause: &[ColumnFilter],
-) -> Result<(BooleanArray, Vec<MetadataColumnStats>), String> {
+) -> Result<(BooleanArray, Vec<MetadataColumnStats>), OttersError> {
     let mut iter = clause.iter();
-    let first = iter
-        .next()
-        .ok_or_else(|| "Clause must contain at least one predicate".to_string())?;
+    let first = iter.next().ok_or(QueryError::EmptyClause)?;
 
     let (mut mask, first_stats) = evaluate_filter(batch, first)?;
     let mut stats = vec![first_stats];
     for filter in iter {
         let (rhs, rhs_stats) = evaluate_filter(batch, filter)?;
         stats.push(rhs_stats);
-        mask = or_kleene(&mask, &rhs).map_err(|e| e.to_string())?;
+        mask = or_kleene(&mask, &rhs)?;
     }
 
     Ok((mask, stats))
@@ -560,7 +554,7 @@ fn evaluate_clause(
 fn evaluate_filter(
     batch: &RecordBatch,
     filter: &ColumnFilter,
-) -> Result<(BooleanArray, MetadataColumnStats), String> {
+) -> Result<(BooleanArray, MetadataColumnStats), OttersError> {
     match filter {
         ColumnFilter::Numeric { column, cmp, rhs } => {
             let array = column_array(batch, column)?;
@@ -577,11 +571,13 @@ fn evaluate_filter(
     }
 }
 
-fn column_array(batch: &RecordBatch, column: &str) -> Result<ArrayRef, String> {
+fn column_array(batch: &RecordBatch, column: &str) -> Result<ArrayRef, OttersError> {
     let idx = batch
         .schema()
         .index_of(column)
-        .map_err(|e| format!("Column '{column}' not found in batch: {e}"))?;
+        .map_err(|_| QueryError::ColumnNotFound {
+            column: column.to_string(),
+        })?;
     Ok(batch.column(idx).clone())
 }
 
@@ -589,88 +585,94 @@ fn evaluate_numeric(
     array: ArrayRef,
     cmp: CmpOp,
     rhs: &crate::expr::NumericLiteral,
-) -> Result<BooleanArray, String> {
+) -> Result<BooleanArray, OttersError> {
     use crate::expr::NumericLiteral;
     match array.data_type() {
         arrow::datatypes::DataType::Int32 => {
             let arr = array
                 .as_any()
                 .downcast_ref::<Int32Array>()
-                .ok_or_else(|| "Expected Int32 array".to_string())?;
+                .ok_or(QueryError::ExpectedArrayType { expected: "Int32" })?;
             let value = match rhs {
                 NumericLiteral::I64(v) => *v as i32,
                 NumericLiteral::F64(_) => {
-                    return Err("Expected integer literal for Int32 comparison".to_string());
+                    return Err(QueryError::ExpectedIntegerLiteral { kind: "Int32" }.into());
                 }
             };
-            compare_int32(arr, cmp, value).map_err(|e| e.to_string())
+            compare_int32(arr, cmp, value).map_err(OttersError::from)
         }
         arrow::datatypes::DataType::Int64 => {
             let arr = array
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .ok_or_else(|| "Expected Int64 array".to_string())?;
+                .ok_or(QueryError::ExpectedArrayType { expected: "Int64" })?;
             let value = match rhs {
                 NumericLiteral::I64(v) => *v,
                 NumericLiteral::F64(_) => {
-                    return Err("Expected integer literal for Int64 comparison".to_string());
+                    return Err(QueryError::ExpectedIntegerLiteral { kind: "Int64" }.into());
                 }
             };
-            compare_int64(arr, cmp, value).map_err(|e| e.to_string())
+            compare_int64(arr, cmp, value).map_err(OttersError::from)
         }
         arrow::datatypes::DataType::Float32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| "Expected Float32 array".to_string())?;
+            let arr = array.as_any().downcast_ref::<Float32Array>().ok_or(
+                QueryError::ExpectedArrayType {
+                    expected: "Float32",
+                },
+            )?;
             let value = match rhs {
                 NumericLiteral::I64(v) => *v as f32,
                 NumericLiteral::F64(v) => *v as f32,
             };
-            compare_float32(arr, cmp, value).map_err(|e| e.to_string())
+            compare_float32(arr, cmp, value).map_err(OttersError::from)
         }
         arrow::datatypes::DataType::Float64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| "Expected Float64 array".to_string())?;
+            let arr = array.as_any().downcast_ref::<Float64Array>().ok_or(
+                QueryError::ExpectedArrayType {
+                    expected: "Float64",
+                },
+            )?;
             let value = match rhs {
                 NumericLiteral::I64(v) => *v as f64,
                 NumericLiteral::F64(v) => *v,
             };
-            compare_float64(arr, cmp, value).map_err(|e| e.to_string())
+            compare_float64(arr, cmp, value).map_err(OttersError::from)
         }
         arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
             let arr = array
                 .as_any()
                 .downcast_ref::<TimestampMillisecondArray>()
-                .ok_or_else(|| "Expected Timestamp(Millisecond) array".to_string())?;
+                .ok_or(QueryError::ExpectedArrayType {
+                    expected: "Timestamp(Millisecond)",
+                })?;
             let value = match rhs {
                 NumericLiteral::I64(v) => *v,
                 NumericLiteral::F64(_) => {
-                    return Err("Expected integer literal for timestamp comparison".to_string());
+                    return Err(QueryError::ExpectedIntegerLiteral { kind: "timestamp" }.into());
                 }
             };
-            compare_timestamp_millis(arr, cmp, value).map_err(|e| e.to_string())
+            compare_timestamp_millis(arr, cmp, value).map_err(OttersError::from)
         }
-        other => Err(format!(
-            "Unsupported numeric column type for filtering: {other:?}"
-        )),
+        other => Err(QueryError::UnsupportedNumericColumn {
+            datatype: other.clone(),
+        }
+        .into()),
     }
 }
 
-fn evaluate_utf8(array: ArrayRef, cmp: CmpOp, rhs: &str) -> Result<BooleanArray, String> {
+fn evaluate_utf8(array: ArrayRef, cmp: CmpOp, rhs: &str) -> Result<BooleanArray, OttersError> {
     match array.data_type() {
         arrow::datatypes::DataType::Utf8 => {
             let arr = array
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| "Expected Utf8 array".to_string())?;
-            compare_utf8(arr, cmp, rhs).map_err(|e| e.to_string())
+                .ok_or(QueryError::ExpectedArrayType { expected: "Utf8" })?;
+            compare_utf8(arr, cmp, rhs).map_err(OttersError::from)
         }
-        other => Err(format!(
-            "Unsupported string column type for filtering: {other:?}"
-        )),
+        other => Err(QueryError::UnsupportedStringColumn {
+            datatype: other.clone(),
+        }
+        .into()),
     }
 }
 
@@ -727,25 +729,28 @@ fn compare_datum(lhs: &dyn Datum, rhs: &dyn Datum, cmp: CmpOp) -> Result<Boolean
     }
 }
 
-fn filter_int64(array: &Int64Array, mask: &BooleanArray) -> Result<Int64Array, String> {
-    let filtered = filter(array, mask).map_err(|e| e.to_string())?;
+fn filter_int64(array: &Int64Array, mask: &BooleanArray) -> Result<Int64Array, OttersError> {
+    let filtered = filter(array, mask)?;
     let filtered = filtered
         .as_any()
         .downcast_ref::<Int64Array>()
-        .ok_or_else(|| "Filtered row id column did not downcast to Int64Array".to_string())?;
+        .ok_or(QueryError::ExpectedArrayType { expected: "Int64" })
+        .map_err(OttersError::from)?;
     Ok(filtered.clone())
 }
 
-fn metric_from_plan(plan: &MetricPlan) -> Result<Option<QueryMetric>, String> {
+fn metric_from_plan(plan: &MetricPlan) -> Result<Option<QueryMetric>, OttersError> {
     let mut metric: Option<QueryMetric> = None;
     for clause in plan {
         for filter in clause {
             let candidate: QueryMetric = filter.metric.into();
             if let Some(existing) = metric {
                 if existing != candidate {
-                    return Err(format!(
-                        "Mixed metric predicates are not supported: {existing:?} vs {candidate:?}"
-                    ));
+                    return Err(QueryError::MixedMetrics {
+                        existing,
+                        candidate,
+                    }
+                    .into());
                 }
             } else {
                 metric = Some(candidate);
@@ -755,37 +760,44 @@ fn metric_from_plan(plan: &MetricPlan) -> Result<Option<QueryMetric>, String> {
     Ok(metric)
 }
 
-fn vectors_array(store: &OttersStore) -> Result<FixedSizeListArray, String> {
+fn vectors_array(store: &OttersStore) -> Result<FixedSizeListArray, OttersError> {
     let column_name = store.embedding_column_name().to_string();
     let column = store.column(&column_name)?;
     let array = column.array().clone();
-    array
+    let downcasted = array
         .as_any()
         .downcast_ref::<FixedSizeListArray>()
-        .cloned()
-        .ok_or_else(|| format!("Embedding column '{column_name}' must be FixedSizeList<Float32>"))
+        .ok_or(QueryError::ExpectedArrayType {
+            expected: "FixedSizeList<Float32>",
+        })
+        .map_err(OttersError::from)?;
+    Ok(downcasted.clone())
 }
 
-fn inv_norms_array(store: &OttersStore) -> Result<Float32Array, String> {
+fn inv_norms_array(store: &OttersStore) -> Result<Float32Array, OttersError> {
     let column_name = store.inv_norm_column_name().to_string();
     let column = store.column(&column_name)?;
     let array = column.array().clone();
-    array
+    let downcasted = array
         .as_any()
         .downcast_ref::<Float32Array>()
-        .cloned()
-        .ok_or_else(|| format!("Inverse norm column '{column_name}' must be Float32Array"))
+        .ok_or(QueryError::ExpectedArrayType {
+            expected: "Float32",
+        })
+        .map_err(OttersError::from)?;
+    Ok(downcasted.clone())
 }
 
-fn row_ids_array(store: &OttersStore) -> Result<Int64Array, String> {
+fn row_ids_array(store: &OttersStore) -> Result<Int64Array, OttersError> {
     let column_name = store.row_id_column_name().to_string();
     let column = store.column(&column_name)?;
     let array = column.array().clone();
-    array
+    let downcasted = array
         .as_any()
         .downcast_ref::<Int64Array>()
-        .cloned()
-        .ok_or_else(|| format!("Row id column '{column_name}' must be Int64Array"))
+        .ok_or(QueryError::ExpectedArrayType { expected: "Int64" })
+        .map_err(OttersError::from)?;
+    Ok(downcasted.clone())
 }
 
 fn score_candidates(
@@ -795,13 +807,14 @@ fn score_candidates(
     metric: QueryMetric,
     selection: &MetadataSelection,
     metric_plan: &MetricPlan,
-) -> Result<Vec<ScoredRow>, String> {
+) -> Result<Vec<ScoredRow>, OttersError> {
     let vectors = vectors_array(store)?;
     let values_array = vectors
         .values()
         .as_any()
         .downcast_ref::<Float32Array>()
-        .ok_or_else(|| "Vector array payload is not Float32".to_string())?;
+        .ok_or(QueryError::InvalidVectorPayload)
+        .map_err(OttersError::from)?;
     let values = values_array.values();
     let dim = store.dim() as usize;
     let inv_norms = inv_norms_array(store)?;
@@ -900,7 +913,7 @@ fn materialize_output(
     store: &OttersStore,
     row_ids: Int64Array,
     scores: Float32Array,
-) -> Result<QueryOutput, String> {
+) -> Result<QueryOutput, OttersError> {
     let indices = to_u32_indices(&row_ids)?;
     let store_batch = store
         .batch()
@@ -908,7 +921,7 @@ fn materialize_output(
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(store_batch.num_columns() + 1);
 
     for column in store_batch.columns() {
-        let taken = take(column.as_ref(), &indices, None).map_err(|e| e.to_string())?;
+        let taken = take(column.as_ref(), &indices, None)?;
         columns.push(taken);
     }
 
@@ -923,28 +936,28 @@ fn materialize_output(
     fields.push(Field::new(SCORE_COLUMN, DataType::Float32, false));
 
     let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema, columns).map_err(|e| e.to_string())?;
+    let batch = RecordBatch::try_new(schema, columns)?;
     Ok(QueryOutput {
         batch: OttersRecord::from(batch),
     })
 }
 
-fn to_u32_indices(row_ids: &Int64Array) -> Result<UInt32Array, String> {
+fn to_u32_indices(row_ids: &Int64Array) -> Result<UInt32Array, OttersError> {
     let mut values = Vec::with_capacity(row_ids.len());
     for i in 0..row_ids.len() {
         let id = row_ids.value(i);
         if id < 0 {
-            return Err("Row id cannot be negative".to_string());
+            return Err(QueryError::NegativeRowId.into());
         }
         if id > u32::MAX as i64 {
-            return Err(format!("Row id {id} exceeds u32::MAX"));
+            return Err(QueryError::RowIdOverflow { value: id }.into());
         }
         values.push(id as u32);
     }
     Ok(UInt32Array::from(values))
 }
 
-fn build_empty_output(store: &OttersStore) -> Result<QueryOutput, String> {
+fn build_empty_output(store: &OttersStore) -> Result<QueryOutput, OttersError> {
     let empty_ids = Int64Array::from(Vec::<i64>::new());
     let empty_scores = Float32Array::from(Vec::<f32>::new());
     materialize_output(store, empty_ids, empty_scores)
@@ -958,7 +971,7 @@ fn build_query_stats_batch(
     durations: &[(&str, f64)],
     metadata_stats: &[MetadataColumnStats],
     vector_stats: Option<(u64, u64)>,
-) -> Result<OttersRecord, String> {
+) -> Result<OttersRecord, OttersError> {
     let mut category_builder = StringBuilder::new();
     let mut name_builder = StringBuilder::new();
     let mut duration_builder = Float64Builder::new();
@@ -1005,9 +1018,7 @@ fn build_query_stats_batch(
         Arc::new(passed_builder.finish()) as ArrayRef,
     ];
 
-    RecordBatch::try_new(schema, columns)
-        .map(OttersRecord::from)
-        .map_err(|e| e.to_string())
+    Ok(OttersRecord::from(RecordBatch::try_new(schema, columns)?))
 }
 
 #[cfg(test)]

@@ -13,6 +13,26 @@ Otters targets smaller to mid-size datasets (up to ~10M vectors) where:
 
 The design leans on chunked zonemaps (min/max/null counts + light Bloom filters) to prune work early, then runs tight SIMD loops for scoring on the surviving chunks.
 
+## Error Handling
+
+All fallible APIs return a shared `OttersError` enum (re-exported from the prelude). Store and query
+builders record validation issues internally so you can chain configuration methods freely—errors are
+reported when `build()`/`collect()` is invoked:
+
+```rust,ignore
+use otters::prelude::*;
+
+fn build_store(...) -> Result<OttersStore, OttersError> {
+    let embeddings = Column::new_vector("embedding", 3)
+        .append(vectors)
+        .collect()?;
+
+    OttersStore::new(["embedding"], [embeddings])
+        .with_embedding_column("embedding")
+        .build()
+}
+```
+
 ## Quick Start
 
 ```rust,ignore
