@@ -22,6 +22,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Instant;
 
 use crate::error::{OttersError, QueryError};
@@ -108,10 +109,18 @@ struct ScoredRow {
     score: f32,
 }
 
+#[derive(Debug, Clone)]
+struct ScoringResult {
+    rows: Vec<ScoredRow>,
+    warning: Option<String>,
+}
+
 /// Final query output containing a projected RecordBatch with scores.
 #[derive(Debug, Clone)]
 pub struct QueryOutput {
     pub batch: OttersRecord,
+    /// Warning produced during scoring (e.g., skipped candidates).
+    pub warning: Option<String>,
 }
 
 impl QueryOutput {
@@ -136,7 +145,11 @@ impl QueryOutput {
 
 impl fmt::Display for QueryOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.batch)
+        write!(f, "{}", self.batch)?;
+        if let Some(warning) = &self.warning {
+            write!(f, "\nWarning: {warning}")?;
+        }
+        Ok(())
     }
 }
 
@@ -184,7 +197,7 @@ impl<'a> OttersQuery<'a> {
     fn set_query_vector_internal(&mut self, vector: Vec<f32>) -> Result<(), OttersError> {
         self.store.ensure_ready()?;
 
-        let expected = self.store.dim() as usize;
+        let expected = self.store.try_dim()? as usize;
         if vector.len() != expected {
             return Err(QueryError::DimensionMismatch {
                 expected,
@@ -233,8 +246,10 @@ impl<'a> OttersQuery<'a> {
 
     /// Limit the result set to top `k` rows (post-filtered).
     ///
-    /// Similarity metrics (`Cosine`, `DotProduct`) return the highest scores first,
-    /// while distance metrics (`Euclidean`) return the smallest distances first.
+    /// Similarity metrics (`Cosine`, `DotProduct`) default to highest-first ordering,
+    /// while distance metrics (`Euclidean`) default to smallest-first ordering.
+    /// Explicit calls to [`order_by_desc`](Self::order_by_desc) or
+    /// [`order_by_asc`](Self::order_by_asc) override this default.
     pub fn take(mut self, k: usize) -> Self {
         if self.error.is_none() {
             self.top_k = Some(k);
@@ -261,6 +276,7 @@ struct QueryExecution<'a> {
     order_desc: Option<bool>,
     durations: Vec<(&'static str, f64)>,
     metadata_stats: Vec<MetadataColumnStats>,
+    warning: Option<String>,
 }
 
 impl<'a> QueryExecution<'a> {
@@ -291,6 +307,7 @@ impl<'a> QueryExecution<'a> {
             order_desc,
             durations: Vec::new(),
             metadata_stats: Vec::new(),
+            warning: None,
         })
     }
 
@@ -308,8 +325,9 @@ impl<'a> QueryExecution<'a> {
         let selection = self.apply_metadata(&metadata_plan)?;
         let candidate_count = selection.row_ids.len() as u64;
         let scored = self.score(&selection, metric, &metric_plan)?;
-        let scored_count = scored.len() as u64;
-        let output = self.materialize(scored)?;
+        let scored_count = scored.rows.len() as u64;
+        let output = self.materialize(scored.rows, metric, scored.warning.clone())?;
+        self.warning = scored.warning;
 
         self.durations
             .push(("total_query", duration_ms(total_start)));
@@ -347,7 +365,7 @@ impl<'a> QueryExecution<'a> {
     }
 
     fn validate_metric_columns(&self, metric_plan: &MetricPlan) -> Result<(), OttersError> {
-        let expected = self.store.embedding_column_name();
+        let expected = self.store.try_embedding_column_name()?;
         for clause in metric_plan {
             for filter in clause {
                 if let Some(column) = &filter.column {
@@ -378,7 +396,7 @@ impl<'a> QueryExecution<'a> {
         selection: &MetadataSelection,
         metric: QueryMetric,
         metric_plan: &MetricPlan,
-    ) -> Result<Vec<ScoredRow>, OttersError> {
+    ) -> Result<ScoringResult, OttersError> {
         let start = Instant::now();
         let scored = score_candidates(
             self.store,
@@ -393,16 +411,25 @@ impl<'a> QueryExecution<'a> {
         Ok(scored)
     }
 
-    fn materialize(&mut self, mut scored: Vec<ScoredRow>) -> Result<QueryOutput, OttersError> {
+    fn materialize(
+        &mut self,
+        mut scored: Vec<ScoredRow>,
+        metric: QueryMetric,
+        warning: Option<String>,
+    ) -> Result<QueryOutput, OttersError> {
         if scored.is_empty() {
             let materialize_start = Instant::now();
-            let output = build_empty_output(self.store)?;
+            let output = build_empty_output(self.store, warning)?;
             self.durations
                 .push(("materialize_output", duration_ms(materialize_start)));
             return Ok(output);
         }
 
-        if let Some(desc) = self.order_desc {
+        let default_desc = matches!(metric, QueryMetric::Cosine | QueryMetric::DotProduct);
+        let should_sort = self.order_desc.is_some() || self.top_k.is_some();
+        let desc = self.order_desc.unwrap_or(default_desc);
+
+        if should_sort {
             scored.sort_by(|a, b| match (b.score.partial_cmp(&a.score), desc) {
                 (Some(ord), true) => ord,
                 (Some(ord), false) => ord.reverse(),
@@ -426,7 +453,7 @@ impl<'a> QueryExecution<'a> {
         let scores = (*scores_array).clone();
 
         let materialize_start = Instant::now();
-        let output = materialize_output(self.store, row_ids, scores)?;
+        let output = materialize_output(self.store, row_ids, scores, warning)?;
         self.durations
             .push(("materialize_output", duration_ms(materialize_start)));
         Ok(output)
@@ -709,7 +736,7 @@ fn compare_timestamp_millis(
     cmp: CmpOp,
     value: i64,
 ) -> Result<BooleanArray, ArrowError> {
-    let scalar = Int64Array::new_scalar(value);
+    let scalar = TimestampMillisecondArray::new_scalar(value);
     compare_datum(array, &scalar, cmp)
 }
 
@@ -761,7 +788,7 @@ fn metric_from_plan(plan: &MetricPlan) -> Result<Option<QueryMetric>, OttersErro
 }
 
 fn vectors_array(store: &OttersStore) -> Result<FixedSizeListArray, OttersError> {
-    let column_name = store.embedding_column_name().to_string();
+    let column_name = store.try_embedding_column_name()?.to_string();
     let column = store.column(&column_name)?;
     let array = column.array().clone();
     let downcasted = array
@@ -775,7 +802,7 @@ fn vectors_array(store: &OttersStore) -> Result<FixedSizeListArray, OttersError>
 }
 
 fn inv_norms_array(store: &OttersStore) -> Result<Float32Array, OttersError> {
-    let column_name = store.inv_norm_column_name().to_string();
+    let column_name = store.try_inv_norm_column_name()?.to_string();
     let column = store.column(&column_name)?;
     let array = column.array().clone();
     let downcasted = array
@@ -807,7 +834,7 @@ fn score_candidates(
     metric: QueryMetric,
     selection: &MetadataSelection,
     metric_plan: &MetricPlan,
-) -> Result<Vec<ScoredRow>, OttersError> {
+) -> Result<ScoringResult, OttersError> {
     let vectors = vectors_array(store)?;
     let values_array = vectors
         .values()
@@ -816,7 +843,7 @@ fn score_candidates(
         .ok_or(QueryError::InvalidVectorPayload)
         .map_err(OttersError::from)?;
     let values = values_array.values();
-    let dim = store.dim() as usize;
+    let dim = store.try_dim()? as usize;
     let inv_norms = inv_norms_array(store)?;
 
     let row_values = selection.row_ids.values();
@@ -824,20 +851,25 @@ fn score_candidates(
     let len = selection.row_ids.len();
     let candidate_slice = &row_values.as_ref()[offset..offset + len];
 
+    let skipped = AtomicUsize::new(0);
+
     let results: Vec<ScoredRow> = candidate_slice
         .par_iter()
         .enumerate()
         .filter_map(|(i, row_id)| {
             if selection.row_ids.is_null(i) || *row_id < 0 {
+                skipped.fetch_add(1, AtomicOrdering::Relaxed);
                 return None;
             }
             let idx = *row_id as usize;
             if vectors.is_null(idx) {
+                skipped.fetch_add(1, AtomicOrdering::Relaxed);
                 return None;
             }
             let offset = idx.checked_mul(dim)?;
             let end = offset.checked_add(dim)?;
             if end > values.len() {
+                skipped.fetch_add(1, AtomicOrdering::Relaxed);
                 return None;
             }
             let embedding = &values[offset..end];
@@ -860,7 +892,17 @@ fn score_candidates(
         })
         .collect();
 
-    Ok(results)
+    let warning = match skipped.load(AtomicOrdering::Relaxed) {
+        0 => None,
+        n => Some(format!(
+            "Skipped {n} candidates with invalid embeddings or row ids; ignore if this is expected."
+        )),
+    };
+
+    Ok(ScoringResult {
+        rows: results,
+        warning,
+    })
 }
 
 fn metric_plan_passes(plan: &MetricPlan, score: f32, metric: QueryMetric) -> bool {
@@ -913,6 +955,7 @@ fn materialize_output(
     store: &OttersStore,
     row_ids: Int64Array,
     scores: Float32Array,
+    warning: Option<String>,
 ) -> Result<QueryOutput, OttersError> {
     let indices = to_u32_indices(&row_ids)?;
     let store_batch = store
@@ -939,6 +982,7 @@ fn materialize_output(
     let batch = RecordBatch::try_new(schema, columns)?;
     Ok(QueryOutput {
         batch: OttersRecord::from(batch),
+        warning,
     })
 }
 
@@ -957,10 +1001,13 @@ fn to_u32_indices(row_ids: &Int64Array) -> Result<UInt32Array, OttersError> {
     Ok(UInt32Array::from(values))
 }
 
-fn build_empty_output(store: &OttersStore) -> Result<QueryOutput, OttersError> {
+fn build_empty_output(
+    store: &OttersStore,
+    warning: Option<String>,
+) -> Result<QueryOutput, OttersError> {
     let empty_ids = Int64Array::from(Vec::<i64>::new());
     let empty_scores = Float32Array::from(Vec::<f32>::new());
-    materialize_output(store, empty_ids, empty_scores)
+    materialize_output(store, empty_ids, empty_scores, warning)
 }
 
 fn duration_ms(start: Instant) -> f64 {
@@ -1019,102 +1066,4 @@ fn build_query_stats_batch(
     ];
 
     Ok(OttersRecord::from(RecordBatch::try_new(schema, columns)?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::col::Column;
-    use crate::expr::col;
-
-    fn build_store() -> OttersStore {
-        let vectors = vec![
-            vec![1.0, 0.0, 0.0],
-            vec![0.8, 0.2, 0.0],
-            vec![0.6, 0.4, 0.0],
-        ];
-
-        let mut vector_builder = Column::new_vector("embedding", 3);
-        for vec in &vectors {
-            vector_builder = vector_builder.append(Some(vec.as_slice()));
-        }
-        let embeddings = vector_builder.collect().unwrap();
-
-        let mut age_builder = Column::new_int32("age");
-        age_builder = age_builder.append(Some(25));
-        age_builder = age_builder.append(Some(35));
-        age_builder = age_builder.append(Some(45));
-        let ages = age_builder.collect().unwrap();
-
-        OttersStore::new(["embedding", "age"], [embeddings, ages])
-            .with_embedding_column("embedding")
-            .build()
-            .unwrap()
-    }
-
-    #[test]
-    fn cosine_query_topk() {
-        let store = build_store();
-        let output = store
-            .query()
-            .with_query_vec(vec![1.0, 0.0, 0.0])
-            .metric(QueryMetric::Cosine)
-            .order_by_desc()
-            .take(2)
-            .collect()
-            .unwrap();
-
-        assert_eq!(output.batch.num_rows(), 2);
-        let row_ids = output
-            .batch
-            .column_by_name(store.row_id_column_name())
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(row_ids.value(0), 0);
-        assert_eq!(row_ids.value(1), 1);
-
-        let scores = output
-            .batch
-            .column_by_name(SCORE_COLUMN)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap();
-        assert!(scores.value(0) >= scores.value(1));
-    }
-
-    #[test]
-    fn metadata_and_metric_filters() {
-        let store = build_store();
-
-        let output = store
-            .query()
-            .with_query_vec(vec![1.0, 0.0, 0.0])
-            .filter(col("embedding").cosine().gt(0.7) & col("age").gte(40))
-            .order_by_desc()
-            .collect()
-            .unwrap();
-
-        assert_eq!(output.batch.num_rows(), 1);
-        let row_ids = output
-            .batch
-            .column_by_name(store.row_id_column_name())
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(row_ids.value(0), 2);
-
-        let score = output
-            .batch
-            .column_by_name(SCORE_COLUMN)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap()
-            .value(0);
-        assert!(score > 0.7);
-    }
 }

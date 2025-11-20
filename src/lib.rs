@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod col;
-mod datetime;
+pub mod datetime;
 pub mod error;
 pub mod expr;
 pub mod prelude;

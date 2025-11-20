@@ -18,14 +18,12 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use arrow_csv::{ReaderBuilder, WriterBuilder, reader::Format};
 use arrow_select::concat::concat_batches;
 use glob::glob;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use std::fmt;
 use std::fs::File;
-use std::io::Seek;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -120,26 +118,6 @@ impl OttersStore {
         let mut batches = Vec::new();
         for path in paths {
             batches.extend(read_parquet_batches(&path)?);
-        }
-
-        Self::from_recordbatches(batches)
-    }
-
-    /// Load one or more CSV files that match `pattern` (header row expected).
-    pub fn from_csv(pattern: impl AsRef<str>) -> Result<Self, OttersError> {
-        let pattern_ref = pattern.as_ref();
-        let paths = collect_paths(pattern_ref)?;
-        if paths.is_empty() {
-            return Err(StoreError::NoFilesMatched {
-                pattern: pattern_ref.to_string(),
-                format: "CSV",
-            }
-            .into());
-        }
-
-        let mut batches = Vec::new();
-        for path in paths {
-            batches.extend(read_csv_batches(&path)?);
         }
 
         Self::from_recordbatches(batches)
@@ -323,11 +301,28 @@ impl OttersStore {
             .expect("Embedding column not configured; call with_embedding_column() first")
     }
 
+    /// Fallible accessor for the embedding column name.
+    pub fn try_embedding_column_name(&self) -> Result<&str, OttersError> {
+        self.embedding_column
+            .as_deref()
+            .ok_or_else(|| StoreError::EmbeddingColumnNotSet.into())
+    }
+
     /// Inverse norm column name (panics if store not built).
     pub fn inv_norm_column_name(&self) -> &str {
         self.inv_norm_column
             .as_deref()
             .expect("Inverse norm column not available; build the store first")
+    }
+
+    /// Fallible accessor for the inverse norm column name.
+    pub fn try_inv_norm_column_name(&self) -> Result<&str, OttersError> {
+        if !self.is_ready() {
+            return Err(StoreError::NotBuilt.into());
+        }
+        self.inv_norm_column
+            .as_deref()
+            .ok_or_else(|| StoreError::NotBuilt.into())
     }
 
     /// Name of the generated row id column.
@@ -417,13 +412,20 @@ impl OttersStore {
 
         match fields.iter().position(|f| f.name() == &inv_norm_name) {
             Some(idx) => {
-                arrays[idx]
+                let inv_norms = arrays[idx]
                     .as_any()
                     .downcast_ref::<Float32Array>()
                     .ok_or_else(|| StoreError::ColumnTypeMismatch {
                         column: inv_norm_name.clone(),
                         expected: "Float32Array",
                     })?;
+                if inv_norms.len() != self.batch.num_rows() || inv_norms.null_count() > 0 {
+                    return Err(StoreError::ColumnTypeMismatch {
+                        column: inv_norm_name.clone(),
+                        expected: "Float32Array without nulls and matching row count",
+                    }
+                    .into());
+                }
             }
             None => {
                 let inv_array = build_inv_norm_array(list_array, &embedding_name)?;
@@ -471,6 +473,33 @@ impl OttersStore {
         match field.data_type() {
             DataType::FixedSizeList(_, value_length) => *value_length,
             other => panic!("Embedding column '{name}' has incompatible type {other:?}"),
+        }
+    }
+
+    /// Fallible dimension accessor.
+    pub fn try_dim(&self) -> Result<i32, OttersError> {
+        if !self.is_ready() {
+            return Err(StoreError::NotBuilt.into());
+        }
+        let schema = self.batch.schema();
+        let name = self.try_embedding_column_name()?.to_string();
+        let field = schema
+            .field_with_name(&name)
+            .map_err(|_| StoreError::ColumnNotFound {
+                column: name.clone(),
+                available: schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect(),
+            })?;
+        match field.data_type() {
+            DataType::FixedSizeList(_, value_length) => Ok(*value_length),
+            _other => Err(StoreError::EmbeddingColumnType {
+                column: name,
+                reason: "expected FixedSizeList<Float32>",
+            }
+            .into()),
         }
     }
 
@@ -523,32 +552,6 @@ impl OttersStore {
             action: "close parquet writer",
             source,
         })?;
-
-        Ok(())
-    }
-
-    /// Persist the store to a CSV file.
-    pub fn write_csv(&self, path: impl AsRef<Path>) -> Result<(), OttersError> {
-        self.ensure_ready()?;
-        let batch = self.batch().expect("store validated via ensure_ready()");
-
-        let out_path = path.as_ref();
-        let path_buf = out_path.to_path_buf();
-        let file = File::create(out_path).map_err(|source| StoreError::IoAction {
-            path: path_buf.clone(),
-            action: "create CSV file",
-            source,
-        })?;
-
-        let mut writer = WriterBuilder::new().with_header(true).build(file);
-
-        writer
-            .write(batch)
-            .map_err(|source| StoreError::ArrowAction {
-                path: path_buf.clone(),
-                action: "write CSV batch",
-                source,
-            })?;
 
         Ok(())
     }
@@ -659,47 +662,6 @@ fn read_parquet_batches(path: &Path) -> Result<Vec<RecordBatch>, OttersError> {
         StoreError::ArrowAction {
             path: owned,
             action: "read parquet batches",
-            source,
-        }
-        .into()
-    })
-}
-
-fn read_csv_batches(path: &Path) -> Result<Vec<RecordBatch>, OttersError> {
-    let owned = path.to_path_buf();
-    let mut file = File::open(path).map_err(|source| StoreError::IoAction {
-        path: owned.clone(),
-        action: "open CSV file",
-        source,
-    })?;
-    let format = Format::default().with_header(true);
-    let (schema, _) =
-        format
-            .infer_schema(&mut file, None)
-            .map_err(|source| StoreError::ArrowAction {
-                path: owned.clone(),
-                action: "infer CSV schema",
-                source,
-            })?;
-    file.rewind().map_err(|source| StoreError::IoAction {
-        path: owned.clone(),
-        action: "rewind CSV file",
-        source,
-    })?;
-
-    let reader = ReaderBuilder::new(Arc::new(schema))
-        .with_format(format)
-        .build(file)
-        .map_err(|source| StoreError::ArrowAction {
-            path: owned.clone(),
-            action: "create CSV reader",
-            source,
-        })?;
-
-    reader.collect::<Result<Vec<_>, _>>().map_err(|source| {
-        StoreError::ArrowAction {
-            path: owned,
-            action: "read CSV batches",
             source,
         }
         .into()

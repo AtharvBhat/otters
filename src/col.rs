@@ -530,11 +530,24 @@ impl<'a> ColumnAppendTarget<'a> {
             BuilderEnum::Vector(b) => {
                 match value {
                     Some(vec) => {
+                        let expected = b.value_length() as usize;
+                        if vec.len() != expected {
+                            return Err(ColumnError::TypeMismatch {
+                                detail: "Vector length does not match fixed dimension",
+                            });
+                        }
                         let values = b.values();
                         values.extend(vec.iter().copied().map(Some));
                         b.append(true);
                     }
-                    None => b.append(false),
+                    None => {
+                        let expected = b.value_length();
+                        let values = b.values();
+                        for _ in 0..expected {
+                            values.append_null();
+                        }
+                        b.append(false);
+                    }
                 }
                 Ok(())
             }
